@@ -1,13 +1,11 @@
-"""LLM adapter: the agent loop only ever calls chat().
+"""LLM backends. The graph only calls get_model() and invoke().
 
-Two backends behind one interface (LLM_PROVIDER):
-  claude_cli  (default) - Claude Code in headless mode (`claude -p`) used as a
-                plain model: all its built-in tools are disabled, so it can
-                only answer with JSON; the agent loop stays ours.
-  anthropic   - the Messages API with native tool calling (needs an API key).
-
-Messages use the Anthropic shape for both backends: user/assistant turns,
-assistant content with "tool_use" blocks, user content with "tool_result" blocks.
+LLM_PROVIDER:
+  claude_cli  (default) - ChatClaudeCLI below: Claude Code in headless mode (`claude -p`)
+                used as a plain model. All its built-in tools are disabled, so it can
+                only reply with JSON; the graph decides what runs.
+  anthropic   - ChatAnthropic (Messages API, native tool calling, needs an API key).
+Both return a LangChain AIMessage with .tool_calls, so graph.py is provider-agnostic.
 """
 import json
 import os
@@ -15,71 +13,108 @@ import subprocess
 import tempfile
 import time
 
+from langchain_anthropic.chat_models import convert_to_anthropic_tool
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+
 DEFAULT_MODEL = "claude-sonnet-5-5"
 MAX_TOKENS = 8000
 CLI_TIMEOUT_S = 180
-
-# The CLI backend returns this shape; --json-schema makes the CLI validate it.
-CLI_REPLY_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "text": {"type": "string"},
-        "tool_calls": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {"name": {"type": "string"}, "input": {"type": "object"}},
-                "required": ["name", "input"],
-            },
-        },
-    },
-    "required": ["text", "tool_calls"],
-}
 
 
 class LLMError(Exception):
     """Raised with a short, human-readable message (no secrets, no stack trace)."""
 
 
-def chat(system: str, messages: list, tools: list | None = None) -> dict:
-    """One LLM turn.
-
-    Returns {
-      "text": str,                       # any prose the model wrote
-      "tool_calls": [{"id", "name", "input"}],
-      "assistant_message": dict,         # append this to messages unchanged
-      "stop_reason": str,
-      "usage": {"input_tokens", "output_tokens"},
-      "seconds": float,
-    }
-    """
+def get_model(tools: list):
+    """Chat model with tools bound, one tool call per step."""
     provider = os.getenv("LLM_PROVIDER", "claude_cli")
     model = os.getenv("LLM_MODEL", DEFAULT_MODEL)
-    started = time.time()
     if provider == "claude_cli":
-        result = _chat_cli(system, messages, tools or [], model)
-    elif provider == "anthropic":
-        result = _chat_anthropic(system, messages, tools or [], model)
-    else:
-        raise LLMError(f"unknown LLM_PROVIDER '{provider}' (use claude_cli or anthropic)")
-    result["seconds"] = round(time.time() - started, 2)
-    return result
+        return ChatClaudeCLI(model=model).bind_tools(tools)
+    if provider == "anthropic":
+        if not os.getenv("ANTHROPIC_API_KEY"):
+            raise LLMError("ANTHROPIC_API_KEY is not set (copy .env.example to .env and fill it in)")
+        from langchain_anthropic import ChatAnthropic
+        # No temperature: Sonnet 5.5 rejects non-default sampling values.
+        chat = ChatAnthropic(
+            model=model, max_tokens=MAX_TOKENS, max_retries=1,  # SDK retries once with backoff
+            # On a safety-classifier decline, the API reruns the request on a fallback model.
+            betas=["server-side-fallback-2026-07-01"], model_kwargs={"fallbacks": "default"},
+        )
+        return chat.bind_tools(tools, parallel_tool_calls=False)
+    raise LLMError(f"unknown LLM_PROVIDER '{provider}' (use claude_cli or anthropic)")
+
+
+def invoke(model, messages: list) -> AIMessage:
+    """model.invoke() with provider errors turned into one short LLMError."""
+    import anthropic
+    try:
+        return model.invoke(messages)
+    except anthropic.AuthenticationError:
+        raise LLMError("Anthropic API key invalid (check ANTHROPIC_API_KEY in .env)")
+    except anthropic.RateLimitError:
+        raise LLMError("Anthropic rate limit hit; wait a minute and retry")
+    except anthropic.APIError as e:
+        raise LLMError(f"Anthropic API error: {type(e).__name__}")
 
 
 # ---------- claude_cli backend ----------
 
+REPLY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "text": {"type": "string"},
+        "tool_calls": {
+            "type": "array", "maxItems": 1,  # one action per step
+            "items": {"type": "object", "properties": {"name": {"type": "string"}, "input": {"type": "object"}},
+                      "required": ["name", "input"]},
+        },
+    },
+    "required": ["text", "tool_calls"],
+}
+
+
+class ChatClaudeCLI(BaseChatModel):
+    """Minimal LangChain chat model on top of `claude -p`. Each call is stateless."""
+
+    model: str = DEFAULT_MODEL
+
+    @property
+    def _llm_type(self) -> str:
+        return "claude-cli"
+
+    def bind_tools(self, tools, **kwargs):
+        return self.bind(tools=[convert_to_anthropic_tool(t) for t in tools])
+
+    def _generate(self, messages, stop=None, run_manager=None, tools=None, **kwargs) -> ChatResult:
+        tools = tools or []
+        system = "\n".join(m.content for m in messages if isinstance(m, SystemMessage))
+        out = _run_cli(_cli_system_prompt(system, tools), _render_transcript(messages), _reply_schema(tools), self.model)
+        reply = out["structured_output"]
+        calls = [{"name": c["name"], "args": c["input"], "id": f"call_{int(time.time() * 1000)}_{i}", "type": "tool_call"}
+                 for i, c in enumerate(reply["tool_calls"])]
+        u = out.get("usage", {})
+        in_tok = u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0) + u.get("cache_read_input_tokens", 0)
+        msg = AIMessage(content=reply["text"], tool_calls=calls, usage_metadata={
+            "input_tokens": in_tok, "output_tokens": u.get("output_tokens", 0),
+            "total_tokens": in_tok + u.get("output_tokens", 0)})
+        return ChatResult(generations=[ChatGeneration(message=msg)])
+
+
 def _render_transcript(messages: list) -> str:
     """Flatten the conversation into text, because each CLI call is stateless."""
     lines = []
-    for msg in messages:
-        blocks = msg["content"] if isinstance(msg["content"], list) else [{"type": "text", "text": msg["content"]}]
-        for b in blocks:
-            if b["type"] == "text" and b["text"]:
-                lines.append(f"[{msg['role'].upper()}]\n{b['text']}")
-            elif b["type"] == "tool_use":
-                lines.append(f"[ASSISTANT TOOL CALL id={b['id']}]\n{b['name']}({json.dumps(b['input'])})")
-            elif b["type"] == "tool_result":
-                lines.append(f"[TOOL RESULT id={b['tool_use_id']}]\n{b['content']}")
+    for m in messages:
+        if isinstance(m, HumanMessage):
+            lines.append(f"[USER]\n{m.content}")
+        elif isinstance(m, AIMessage):
+            if m.content:
+                lines.append(f"[ASSISTANT]\n{m.content}")
+            lines += [f"[ASSISTANT TOOL CALL id={c['id']}]\n{c['name']}({json.dumps(c['args'])})" for c in m.tool_calls]
+        elif isinstance(m, ToolMessage):
+            lines.append(f"[TOOL RESULT id={m.tool_call_id}]\n{m.content}")
     return "\n\n".join(lines)
 
 
@@ -90,32 +125,29 @@ def _cli_system_prompt(system: str, tools: list) -> str:
     return (
         f"{system}\n\n# Actions (requested, not called)\nThe 'tools' named above are ACTIONS run by "
         "an outside program, not functions you can invoke. Your ONLY callable function is the "
-        "structured-output one: call it once per turn. To request actions, list them in its "
-        "`tool_calls` field as {name, input}. The program runs them and shows each result as "
+        "structured-output one: call it once per turn. To request an action, put it in its "
+        "`tool_calls` field as {name, input}. The program runs it and shows the result as "
         "[TOOL RESULT] in the next turn. A requested action is never 'unavailable' unless a "
         f"[TOOL RESULT] says so.\n\nAvailable actions:\n{specs}\n\n"
-        "# How to reply\nYou may request several independent actions at once. Put any short "
-        "explanation in `text`. Leave `tool_calls` empty only for a direct answer that needs no "
-        "repo data."
+        "# How to reply\nRequest exactly ONE action per reply. Put any short explanation in "
+        "`text`. Leave `tool_calls` empty only for a direct answer that needs no repo data."
     )
 
 
 def _reply_schema(tools: list) -> dict:
     """Action names go into the reply schema as an enum: the one place the model may 'call' them."""
-    schema = json.loads(json.dumps(CLI_REPLY_SCHEMA))  # deep copy
+    schema = json.loads(json.dumps(REPLY_SCHEMA))  # deep copy
     names = [t["name"] for t in tools]
     item = schema["properties"]["tool_calls"]["items"]
     item["properties"]["name"] = {"type": "string", "enum": names} if names else {"type": "string"}
-    schema["properties"]["tool_calls"]["description"] = "Actions for the program to run: " + ", ".join(names)
+    schema["properties"]["tool_calls"]["description"] = "At most one action for the program to run: " + ", ".join(names)
     return schema
 
 
-def _chat_cli(system: str, messages: list, tools: list, model: str) -> dict:
+def _run_cli(system: str, transcript: str, schema: dict, model: str) -> dict:
     cmd = [
-        "claude", "-p", "--output-format", "json",
-        "--model", model,
-        "--system-prompt", _cli_system_prompt(system, tools),
-        "--json-schema", json.dumps(_reply_schema(tools)),
+        "claude", "-p", "--output-format", "json", "--model", model,
+        "--system-prompt", system, "--json-schema", json.dumps(schema),
         # Lock it down: no built-in tools, no MCP servers, no user/project settings or skills.
         "--tools", "", "--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands",
         "--no-session-persistence",
@@ -126,72 +158,19 @@ def _chat_cli(system: str, messages: list, tools: list, model: str) -> dict:
     for attempt in (1, 2):  # one retry, e.g. for a transient network or overload error
         try:
             # Run in a temp dir so no project CLAUDE.md is pulled into the prompt.
-            proc = subprocess.run(cmd, input=_render_transcript(messages), capture_output=True, text=True,
+            proc = subprocess.run(cmd, input=transcript, capture_output=True, text=True,
                                   timeout=CLI_TIMEOUT_S, env=env, cwd=tempfile.gettempdir())
             out = json.loads(proc.stdout)
             # A good reply takes 2 CLI turns (think + structured output). More means the model
             # tried to invoke an action natively and got confused, so retry it.
             if not out.get("is_error") and out.get("structured_output") is not None and out.get("num_turns", 2) <= 2:
-                break
+                return out
         except FileNotFoundError:
             raise LLMError("`claude` CLI not found; install Claude Code or use LLM_PROVIDER=anthropic")
         except (subprocess.TimeoutExpired, json.JSONDecodeError):
             out = None
         if attempt == 1:
             time.sleep(2)
-    if not out or out.get("is_error") or out.get("structured_output") is None:  # after retry, accept >2 turns
-        reason = (out or {}).get("result") or "no valid reply"
-        raise LLMError(f"Claude CLI call failed: {str(reason)[:200]}")
-
-    reply = out["structured_output"]
-    tool_calls = [{"id": f"call_{i}_{int(time.time() * 1000)}", "name": c["name"], "input": c["input"]}
-                  for i, c in enumerate(reply["tool_calls"])]
-    content = ([{"type": "text", "text": reply["text"]}] if reply["text"] else [])
-    content += [{"type": "tool_use", **c} for c in tool_calls]
-    u = out.get("usage", {})
-    return {
-        "text": reply["text"],
-        "tool_calls": tool_calls,
-        "assistant_message": {"role": "assistant", "content": content},
-        "stop_reason": "tool_use" if tool_calls else "end_turn",
-        "usage": {
-            "input_tokens": u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
-            + u.get("cache_read_input_tokens", 0),
-            "output_tokens": u.get("output_tokens", 0),
-        },
-    }
-
-
-# ---------- anthropic backend ----------
-
-def _chat_anthropic(system: str, messages: list, tools: list, model: str) -> dict:
-    import anthropic  # imported here so the CLI backend works without an API key
-
-    if not os.getenv("ANTHROPIC_API_KEY"):
-        raise LLMError("ANTHROPIC_API_KEY is not set (copy .env.example to .env and fill it in)")
-    # max_retries=1: the SDK retries once with backoff on 429/5xx/connection errors.
-    client = anthropic.Anthropic(max_retries=1)
-    try:
-        resp = client.beta.messages.create(
-            model=model, max_tokens=MAX_TOKENS, system=system, messages=messages, tools=tools,
-            # If a safety classifier declines, the API retries on a fallback model
-            # inside the same call instead of returning an empty answer.
-            betas=["server-side-fallback-2026-07-01"], fallbacks="default",
-        )
-    except anthropic.AuthenticationError:
-        raise LLMError("Anthropic API key invalid (check ANTHROPIC_API_KEY in .env)")
-    except anthropic.RateLimitError:
-        raise LLMError("Anthropic rate limit hit; wait a minute and retry")
-    except anthropic.APIStatusError as e:
-        raise LLMError(f"Anthropic API error {e.status_code}")
-    except anthropic.APIConnectionError:
-        raise LLMError("could not reach the Anthropic API (network problem)")
-
-    return {
-        "text": "".join(b.text for b in resp.content if b.type == "text"),
-        "tool_calls": [{"id": b.id, "name": b.name, "input": b.input} for b in resp.content if b.type == "tool_use"],
-        # Content is passed back exactly as received (incl. thinking blocks), as the API requires.
-        "assistant_message": {"role": "assistant", "content": resp.content},
-        "stop_reason": resp.stop_reason,
-        "usage": {"input_tokens": resp.usage.input_tokens, "output_tokens": resp.usage.output_tokens},
-    }
+    if out and not out.get("is_error") and out.get("structured_output") is not None:
+        return out  # after the retry, accept a reply that took extra turns
+    raise LLMError(f"Claude CLI call failed: {str((out or {}).get('result') or 'no valid reply')[:200]}")

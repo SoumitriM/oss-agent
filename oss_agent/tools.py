@@ -4,6 +4,8 @@ success -> {"ok": True, ...}, failure -> {"ok": False, "error": "<short reason>"
 import base64
 import re
 
+from langchain_core.tools import StructuredTool
+
 from oss_agent import http
 
 GH = "https://api.github.com"
@@ -156,5 +158,20 @@ TOOL_SCHEMAS = [
     },
 ]
 
-# Name -> function for the data tools. submit_report is handled by the loop itself.
+# Name -> plain function for the data tools. submit_report is handled by the tools node itself.
 DATA_TOOLS = {"get_repo_info": get_repo_info}
+
+
+def _submit_report(report: dict) -> dict:
+    return {"ok": True}  # never run: the graph's tools node validates and stores the report
+
+
+# Thin LangChain wrappers: they only carry name, description and JSON schema to bind_tools().
+# The graph calls the plain functions above, so tools stay testable without LangChain.
+LC_TOOLS = [
+    StructuredTool.from_function(
+        func={**DATA_TOOLS, "submit_report": _submit_report}[s["name"]],
+        name=s["name"], description=s["description"], args_schema=s["input_schema"],
+    )
+    for s in TOOL_SCHEMAS
+]
