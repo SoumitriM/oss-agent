@@ -37,7 +37,15 @@ def minimal_report(question: str, repo_info: dict | None, reason: str) -> dict:
     }
 
 
-def post_process(report: dict, repo_info: dict | None) -> dict:
+def _raise_status(area: dict, rule: tuple[str, str]) -> None:
+    """Apply a code rule that can only make an area worse, never better."""
+    status, note = rule
+    area["rule"] = note
+    if rules.RANK[status] > rules.RANK.get(area["status"], 0) or area["status"] == "not_checked":
+        area["status"], area["summary"] = status, note  # code's words replace the LLM's
+
+
+def post_process(report: dict, repo_info: dict | None, tool_outputs: list = ()) -> dict:
     """Code overrides the LLM where facts are deterministic."""
     for a in AREAS:  # areas the LLM skipped are explicitly "not checked"
         report["areas"].setdefault(a, {"status": "not_checked", "summary": "not checked"})
@@ -52,24 +60,31 @@ def post_process(report: dict, repo_info: dict | None) -> dict:
             report["areas"]["licence"]["rule"] = rule[1]
         if repo_info["archived"]:
             report["areas"]["maintenance"] = {"status": "red", "summary": "Repository is archived: no more fixes."}
+    for out in tool_outputs:  # end-of-life versions and malware releases: code decides
+        if out["tool"] == "check_vulnerabilities" and out["result"].get("ok"):
+            rule = rules.vulnerability_rule(out["result"])
+            if rule:
+                _raise_status(report["areas"]["security"], rule)
+    report["legal"] = rules.legal_refs(report["findings"], report["areas"])
     report["overall"] = rules.overall(report["areas"])
     report["checked_on"] = date.today().isoformat()
     return report
 
 
 def render(report: dict) -> str:
-    commit = (report.get("commit") or "")[:7] or "?"
-    lines = [f"{report['repo']} @ {commit} · checked {report['checked_on']}",
+    commit = f"@ {report['commit'][:7]}" if report.get("commit") else "(no commit checked)"
+    lines = [f"{report['repo']} {commit} · checked {report['checked_on']}",
              f"Overall: {ICON[report['overall']]} {VERDICT[report['overall']]}"]
     if report["assumptions"]:
         lines.append("Assumed: " + " · ".join(report["assumptions"]))
     lines.append("")
     for name in AREAS:
         area = report["areas"][name]
-        lines.append(f"{name.upper():<12} {ICON[area['status']]} {area['summary']}")
+        articles = ", ".join(r["article"] for r in report.get("legal", []) if r["area"] == name)
+        lines.append(f"{name.upper():<12} {ICON[area['status']]} {area['summary']}" + (f"  ({articles})" if articles else ""))
         findings = [f for f in report["findings"] if f.get("area") == name]
-        # One evidence line per area: prefer verified quotes with a line-pinned link.
-        for f in sorted(findings, key=lambda f: (not f.get("verified"), "#L" not in f["url"]))[:1]:
+        # One evidence line per area: the LLM's most important VERIFIED finding (sort is stable).
+        for f in sorted(findings, key=lambda f: not f.get("verified"))[:1]:
             quote = " ".join(f["evidence_quote"].split())  # one line, normalised whitespace
             mark = "✔" if f.get("verified") else "⚠ unverified"
             lines.append(f"{'':<14}\"{quote[:90]}{'…' if len(quote) > 90 else ''}\"")

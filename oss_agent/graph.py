@@ -131,7 +131,7 @@ def build_graph(model=None):
     def checks(state: State) -> dict:
         report = dict(state["report"])  # deterministic from here on, no LLM
         report["findings"] = evidence.verify(report.get("findings", []), state["tool_outputs"])
-        report = rep.post_process(report, state["repo_info"])
+        report = rep.post_process(report, state["repo_info"], state["tool_outputs"])
         ok = sum(f["verified"] for f in report["findings"])
         detail = f"quotes verified {ok}/{len(report['findings'])}, overall={report['overall']}"
         return {"report": report, "trace": [{"node": "checks", "step": state["steps"], "detail": detail}]}

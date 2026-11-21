@@ -48,23 +48,29 @@ def _locate(quote: str, lines: list) -> tuple[int, int] | None:
     return first, last
 
 
+def _strings(value) -> list:
+    """All string values inside a nested dict/list."""
+    if isinstance(value, str):
+        return [value]
+    children = value.values() if isinstance(value, dict) else value if isinstance(value, list) else []
+    return [s for child in children for s in _strings(child)]
+
+
+def _items_with_url(value):
+    """Dicts that carry their own "url", innermost first (a CVE before the list that holds it)."""
+    children = value.values() if isinstance(value, dict) else value if isinstance(value, list) else []
+    for child in children:
+        yield from _items_with_url(child)
+    if isinstance(value, dict) and "url" in value and not str(value.get("url", "")).count("#L"):
+        yield value  # line-pinned file excerpts are handled by _documents instead
+
+
 def _haystack(tool_outputs: list) -> str:
     """Everything the LLM saw (JSON text) plus all raw string values, normalised."""
     parts = []
-
-    def strings(value):
-        if isinstance(value, str):
-            parts.append(value)
-        elif isinstance(value, dict):
-            for v in value.values():
-                strings(v)
-        elif isinstance(value, list):
-            for v in value:
-                strings(v)
-
     for out in tool_outputs:
         parts.append(json.dumps(out["result"], ensure_ascii=False))
-        strings(out["result"])
+        parts += _strings(out["result"])
     text = "\n".join(parts)
     text = "\n".join(NUMBERED_LINE.sub(r"\2", row) for row in text.splitlines())  # drop "  30| "
     return norm(text)
@@ -77,10 +83,10 @@ def _source_url(quote: str, tool_outputs: list, docs: list) -> str | None:
         if span:
             a, b = first_line + span[0], first_line + span[1]
             return f"{base_url}#L{a}" + (f"-L{b}" if b > a else "")
-    for out in tool_outputs:  # 2. a code-search fragment -> that file
-        for hit in out["result"].get("hits", []) if out["tool"] == "search_code" else []:
-            if any(quote in norm(frag) for frag in hit["fragments"]):
-                return hit["url"]
+    for out in tool_outputs:  # 2. an item with its own link (search hit, CVE, advisory, endoflife)
+        for item in _items_with_url(out["result"]):
+            if quote in norm(json.dumps(item, ensure_ascii=False)) or quote in norm(" ".join(_strings(item))):
+                return item["url"]
     for out in tool_outputs:  # 3. repo metadata -> the repo page
         if out["tool"] == "get_repo_info" and out["result"].get("ok"):
             return f"https://github.com/{out['result']['repo']}"

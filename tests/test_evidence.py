@@ -39,5 +39,13 @@ def test_search_fragment_quote_links_to_that_file():
     assert f["verified"] and f["url"] == "https://github.com/o/r/blob/abc/cfg.ts"
 
 
+def test_cve_summary_quote_links_to_that_cve():
+    vulns = {"tool": "check_vulnerabilities", "args": {}, "result": {"ok": True, "nvd_items": [
+        {"id": "CVE-1", "summary": "Heap overflow in parser", "url": "https://nvd.nist.gov/vuln/detail/CVE-1"},
+        {"id": "CVE-2", "summary": "Header injection", "url": "https://nvd.nist.gov/vuln/detail/CVE-2"}]}}
+    [f] = evidence.verify([finding("Header injection")], [INFO, vulns])
+    assert f["verified"] and f["url"].endswith("CVE-2")
+
+
 def test_empty_quote_is_unverified():
     assert not evidence.verify([finding("")], [READ])[0]["verified"]

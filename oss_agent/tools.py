@@ -8,6 +8,8 @@ from urllib.parse import quote
 from langchain_core.tools import StructuredTool
 
 from oss_agent import http
+from oss_agent.rules import LEGAL_TAGS
+from oss_agent.vulns import check_vulnerabilities
 
 GH = "https://api.github.com"
 RAW = "https://raw.githubusercontent.com"
@@ -168,6 +170,24 @@ TOOL_SCHEMAS = [
         },
     },
     {
+        "name": "check_vulnerabilities",
+        "description": (
+            "Known security problems for a product: CVEs from NVD (matched by CPE vendor:product, "
+            "version ranges checked), GitHub advisories incl. MALWARE / hijacked releases (needs an "
+            "ecosystem), and end-of-life status from endoflife.date. Give a version for an exact check."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "product": {"type": "string", "description": "CPE / package name, lowercase, e.g. 'php', 'axios'"},
+                "vendor": {"type": "string", "description": "CPE vendor if different from product, e.g. 'nodejs' for node.js"},
+                "ecosystem": {"type": "string", "description": "package ecosystem: npm, pip, maven, go, rubygems, nuget, composer, rust"},
+                "version": {"type": "string", "description": "e.g. '8.1' or '1.14.1'"},
+            },
+            "required": ["product"],
+        },
+    },
+    {
         "name": "search_code",
         "description": (
             "Search code inside one GitHub repo (max 10 files, with matching fragments). Use it to find "
@@ -236,6 +256,8 @@ TOOL_SCHEMAS = [
                                     "evidence_quote": {"type": "string", "description": "short verbatim quote from a tool result"},
                                     "url": {"type": "string"},
                                     "source_tool": {"type": "string"},
+                                    "tags": {"type": "array", "items": {"type": "string", "enum": LEGAL_TAGS},
+                                             "description": "facts this finding shows; code maps them to legal articles"},
                                 },
                                 "required": ["area", "claim", "evidence_quote", "url", "source_tool"],
                             },
@@ -254,7 +276,8 @@ TOOL_SCHEMAS = [
 ]
 
 # Name -> plain function for the data tools. submit_report is handled by the tools node itself.
-DATA_TOOLS = {"get_repo_info": get_repo_info, "search_code": search_code, "read_file": read_file}
+DATA_TOOLS = {"get_repo_info": get_repo_info, "search_code": search_code, "read_file": read_file,
+              "check_vulnerabilities": check_vulnerabilities}
 
 
 def _submit_report(report: dict) -> dict:

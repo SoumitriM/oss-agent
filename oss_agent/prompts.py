@@ -16,6 +16,11 @@ How to work
   and explain the limits in plain words.
 - Privacy / customer data: use search_code for telemetry, diagnostics or analytics,
   then read_file the config to quote whether it is ON by default.
+- Security / "do we need to act?" / adding a dependency: call check_vulnerabilities.
+  Give the version if the user named one, and the ecosystem for packages (npm, pip, ...)
+  so malware / hijacked releases are checked. If no version is known, say so in assumptions.
+- Tag findings with the facts they show (tags field), e.g. telemetry_on_by_default.
+  Code maps tags to GDPR/CRA articles; never cite legal articles yourself.
 - Finish by calling submit_report exactly once. Areas you did not check get
   status "not_checked". Put what must hold for safe use in conditions.
   Keep conditions and open_questions to at most 3 items each, one short sentence each.

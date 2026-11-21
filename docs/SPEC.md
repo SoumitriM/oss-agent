@@ -62,6 +62,7 @@ oss_agent/
   tools.py      # plain tool functions + thin LangChain tool schemas
   http.py       # one GET helper: allowlist, timeout, size cap, disk cache
   rules.py      # deterministic logic: licence table, verdicts, GDPR/CRA mapping
+  vulns.py      # check_vulnerabilities: NVD + GitHub advisories + endoflife (M3)
   evidence.py   # quote verification + pinned GitHub links            (M2)
   report.py     # report schema, validation, post-processing, rendering
   prompts.py    # system prompt
@@ -155,12 +156,14 @@ All tools are read-only, return JSON-serialisable dicts and never raise:
 success → `{"ok": true, ...}`, failure → `{"ok": false, "error": "<short reason>"}`.
 
 1. **get_repo_info(repo)** (M1). Uses the GitHub API to fetch: description, archived flag, default branch, HEAD SHA and date, stars, open issues, licence SPDX id, first 60 lines of the licence file (pinned link), first 40 lines of SECURITY.md (repo locations, then the org-wide `{owner}/.github`), and SKILL.md paths (via code search, max 50; git trees of big repos exceed the size cap).
-2. **check_vulnerabilities(product, ecosystem?, version?)** (M3). It combines three sources:
-   - **NVD:** keyword search, then keep only CVEs whose CPE product matches and, if a version is given, whose version range includes it (`packaging`). Max 10, newest first.
-   - **GitHub global advisories,** including `type=malware`, to catch hijacked releases without a CVE.
-   - **endoflife.date** support status.
+2. **check_vulnerabilities(product, vendor?, ecosystem?, version?)** (M3, in `vulns.py`). It combines three sources:
+   - **NVD:** match by CPE `virtualMatchString=cpe:2.3:a:{vendor}:{product}` (`vendor` defaults to `product`), take the **newest 100** CVEs (a count call, then the last page, because NVD sorts oldest first), and, if a version is given, keep only CVEs whose vulnerable CPE range includes it (checked locally with `packaging`). Max 10 results, newest first (6 when advisories are included).
+     *Changed from v2:* keyword search was dropped, because "php" matches 13,256 CVEs, mostly PHP web apps, while CPE `php:php` matches 760.
+   - **GitHub global advisories** (needs `ecosystem`), with `type=malware` and `type=reviewed` both filtered by `affects=pkg[@version]`, to catch hijacked releases without a CVE.
+   - **endoflife.date:** the version's release cycle (matched with `packaging`), its EOL date and `is_eol`, plus the supported cycles.
 
-   If NVD fails, the result carries `nvd_unavailable: true`. If no version is given, it notes "give a version for an exact check".
+   The result is ordered endoflife → GitHub → NVD, so the 4,000-character cap can only cut NVD's tail.
+   A failing source is reported (`nvd_unavailable: true`, `github_unavailable: true`) and never hides the others. If no version is given, the result notes "give a version for an exact check".
 3. **search_code(repo, query)** (M2). GitHub code search within the repo, max 10 hits (path + fragments). Used for telemetry, analytics and external endpoints.
 4. **read_file(repo, path, start_line=1, end_line=120)** (M2). Raw file at the HEAD commit, with line numbers, max 200 lines, and a pinned link `https://github.com/{repo}/blob/{sha}/{path}#L{a}-L{b}`.
 5. **scan_skill(repo, skill_path)** (M4). Reads SKILL.md and lists the skill folder. Deterministic regex red flags: network calls, secret paths (`~/.ssh`, `.env`, tokens), eval/exec, base64 decoding, piping to a shell. Each flag has file, line and a pinned link. The LLM judges whether the flags match the skill's stated purpose.
@@ -194,13 +197,24 @@ success → `{"ok": true, ...}`, failure → `{"ok": false, "error": "<short rea
   - no licence → red.
 - **Repo and commit** come from the API, never from the LLM. An archived repo → red maintenance.
 - **Quote verification:** each `evidence_quote` must appear (with normalised whitespace) in a tool output from this run. If not, the finding is marked and shown as "⚠ unverified".
+- **Links:** code replaces the LLM's URL with where the quote was actually found:
+  1. a file excerpt → `#L<a>-L<b>`;
+  2. an item with its own `url` (search hit, CVE, advisory, endoflife) → that URL;
+  3. repo metadata → the repo page.
+- **Vulnerability rules** (code can only make the security area worse, never better):
+  - end-of-life version → red, "upgrade to <newest supported cycle>";
+  - malware advisory for the given version → red;
+  - malware advisories but no version given → yellow, naming the bad releases.
 - **Overall verdict** = the worst area (red > yellow > green).
-- **GDPR/CRA mapping** (a fixed dict with EUR-Lex links):
-  - telemetry on by default → GDPR Art. 25;
-  - data sent to non-EU services → Art. 44;
-  - the vendor processes your data → Art. 28;
-  - large-scale personal data → Art. 35;
-  - any security finding → CRA Art. 13(5).
+- **GDPR/CRA mapping** (a fixed dict with EUR-Lex links). The LLM sets fact `tags` on findings; code maps them,
+  **only for verified findings**:
+  - `telemetry_on_by_default` → GDPR Art. 25;
+  - `data_to_non_eu_service` → Art. 44;
+  - `vendor_processes_data` → Art. 28;
+  - `large_scale_personal_data` → Art. 35;
+  - a yellow/red security area, or any verified security finding → CRA Art. 13(5).
+
+  Articles are shown on the area line, e.g. `PRIVACY 🟡 … (GDPR Art. 25)`; the full list is in `report["legal"]`.
 - The agent gives facts and points to articles. It never says "compliant".
 
 ## 9. System prompt essentials (prompts.py)
