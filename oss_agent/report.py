@@ -41,7 +41,7 @@ def post_process(report: dict, repo_info: dict | None) -> dict:
     """Code overrides the LLM where facts are deterministic."""
     for a in AREAS:  # areas the LLM skipped are explicitly "not checked"
         report["areas"].setdefault(a, {"status": "not_checked", "summary": "not checked"})
-    for key in ("assumptions", "open_questions", "findings"):
+    for key in ("assumptions", "conditions", "open_questions", "findings"):
         report.setdefault(key, [])
     if repo_info:
         report["repo"] = repo_info["repo"]
@@ -67,11 +67,16 @@ def render(report: dict) -> str:
     for name in AREAS:
         area = report["areas"][name]
         lines.append(f"{name.upper():<12} {ICON[area['status']]} {area['summary']}")
-        for f in [f for f in report["findings"] if f.get("area") == name][:1]:  # one evidence line per area
+        findings = [f for f in report["findings"] if f.get("area") == name]
+        # One evidence line per area: prefer verified quotes with a line-pinned link.
+        for f in sorted(findings, key=lambda f: (not f.get("verified"), "#L" not in f["url"]))[:1]:
             quote = " ".join(f["evidence_quote"].split())  # one line, normalised whitespace
+            mark = "✔" if f.get("verified") else "⚠ unverified"
             lines.append(f"{'':<14}\"{quote[:90]}{'…' if len(quote) > 90 else ''}\"")
-            lines.append(f"{'':<14}→ {f['url']}")
-    if report["open_questions"]:
-        lines += ["", "Open questions: " + " · ".join(report["open_questions"])]
+            lines.append(f"{'':<14}→ {f['url']} {mark}")
+    for label, items in (("Conditions", report["conditions"]), ("Open questions", report["open_questions"])):
+        if items:  # keep the terminal view short; --json has everything
+            more = f" (+{len(items) - 3} more in --json)" if len(items) > 3 else ""
+            lines += ["", f"{label}: " + " · ".join(items[:3]) + more]
     lines += ["", f"Recommendation: {report['recommendation']}"]
     return "\n".join(lines)

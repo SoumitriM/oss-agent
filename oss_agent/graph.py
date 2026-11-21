@@ -17,7 +17,7 @@ from langchain_core.messages import SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
-from oss_agent import llm, report as rep
+from oss_agent import evidence, llm, report as rep
 from oss_agent.prompts import SYSTEM_PROMPT
 from oss_agent.tools import DATA_TOOLS, LC_TOOLS, TOOL_SCHEMAS
 
@@ -129,8 +129,12 @@ def build_graph(model=None):
                 "trace": [{"node": "force_report", "step": state["steps"], "detail": reason}]}
 
     def checks(state: State) -> dict:
-        report = rep.post_process(dict(state["report"]), state["repo_info"])  # deterministic, no LLM
-        return {"report": report, "trace": [{"node": "checks", "step": state["steps"], "detail": f"overall={report['overall']}"}]}
+        report = dict(state["report"])  # deterministic from here on, no LLM
+        report["findings"] = evidence.verify(report.get("findings", []), state["tool_outputs"])
+        report = rep.post_process(report, state["repo_info"])
+        ok = sum(f["verified"] for f in report["findings"])
+        detail = f"quotes verified {ok}/{len(report['findings'])}, overall={report['overall']}"
+        return {"report": report, "trace": [{"node": "checks", "step": state["steps"], "detail": detail}]}
 
     def route_after_agent(state: State) -> str:
         calls = state["messages"][-1].tool_calls

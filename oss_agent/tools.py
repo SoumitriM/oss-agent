@@ -3,6 +3,7 @@ success -> {"ok": True, ...}, failure -> {"ok": False, "error": "<short reason>"
 """
 import base64
 import re
+from urllib.parse import quote
 
 from langchain_core.tools import StructuredTool
 
@@ -88,6 +89,67 @@ def get_repo_info(repo: str) -> dict:
     return result
 
 
+MAX_LINES = 200
+MAX_FILE_CHARS = 3500  # stays under the 4,000-char tool-result cap, so no line is cut silently
+
+
+def _head_sha(repo: str) -> dict:
+    head = http.get(f"{GH}/repos/{repo}/commits/HEAD")
+    return {"ok": True, "sha": head["data"]["sha"]} if head["ok"] else {"ok": False, "error": f"repo {repo}: {head['error']}"}
+
+
+def read_file(repo: str, path: str, start_line: int = 1, end_line: int = 120) -> dict:
+    """Lines of one file at the HEAD commit, numbered, with a pinned link to exactly those lines."""
+    if not REPO_RE.match(repo or ""):
+        return {"ok": False, "error": "repo must look like owner/name"}
+    if not path or path.startswith("/") or ".." in path.split("/"):
+        return {"ok": False, "error": "path must be relative to the repo root, without '..'"}
+    head = _head_sha(repo)
+    if not head["ok"]:
+        return head
+    sha = head["sha"]
+    url_path = quote(path, safe="/@")  # encode spaces etc., keep '@' readable
+    raw = http.get(f"{RAW}/{repo}/{sha}/{url_path}", as_json=False)
+    if not raw["ok"]:
+        return {"ok": False, "error": f"{path}: {raw['error']}"}
+    lines = raw["data"].splitlines()
+    start = max(1, int(start_line))
+    end = min(len(lines), int(end_line), start + MAX_LINES - 1)
+    numbered, size = [], 0
+    for n in range(start, end + 1):  # stop early if the text gets too long for the LLM
+        row = f"{n:>5}| {lines[n - 1]}"
+        if size + len(row) > MAX_FILE_CHARS and numbered:
+            end = n - 1
+            break
+        numbered.append(row)
+        size += len(row) + 1
+    result = {
+        "ok": True, "path": path, "commit": sha, "start_line": start, "end_line": end,
+        "total_lines": len(lines), "content": "\n".join(numbered),
+        "url": f"https://github.com/{repo}/blob/{sha}/{url_path}#L{start}-L{end}",
+    }
+    if end < len(lines):
+        result["note"] = f"truncated: call again with start_line={end + 1} to read more"
+    return result
+
+
+def search_code(repo: str, query: str) -> dict:
+    """GitHub code search inside one repo: up to 10 files with matching line fragments."""
+    if not REPO_RE.match(repo or ""):
+        return {"ok": False, "error": "repo must look like owner/name"}
+    if re.search(r"\b(repo|org|user):", query or ""):
+        return {"ok": False, "error": "query must not contain repo:/org:/user: qualifiers"}
+    res = http.get(f"{GH}/search/code", params={"q": f"{query} repo:{repo}", "per_page": 10},
+                   headers={"Accept": "application/vnd.github.text-match+json"})  # asks for fragments
+    if not res["ok"]:
+        return {"ok": False, "error": f"code search: {res['error']}"}
+    hits = [{"path": item["path"], "url": item["html_url"],
+             "fragments": [m["fragment"][:300] for m in item.get("text_matches", [])][:3]}
+            for item in res["data"]["items"][:10]]
+    return {"ok": True, "query": query, "total_count": res["data"]["total_count"], "hits": hits,
+            "note": "fragments have no line numbers: use read_file to quote exact lines"}
+
+
 AREAS = ["licence", "security", "maintenance", "privacy", "skills"]
 STATUSES = ["green", "yellow", "red", "not_checked"]
 
@@ -103,6 +165,37 @@ TOOL_SCHEMAS = [
             "type": "object",
             "properties": {"repo": {"type": "string", "description": "owner/name, e.g. pallets/flask"}},
             "required": ["repo"],
+        },
+    },
+    {
+        "name": "search_code",
+        "description": (
+            "Search code inside one GitHub repo (max 10 files, with matching fragments). Use it to find "
+            "telemetry, analytics or external endpoints, e.g. 'telemetry', 'diagnostics', 'posthog', "
+            "'N8N_DIAGNOSTICS_ENABLED'. Fragments have no line numbers: use read_file to quote exact lines."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"repo": {"type": "string"}, "query": {"type": "string", "description": "words or identifiers"}},
+            "required": ["repo", "query"],
+        },
+    },
+    {
+        "name": "read_file",
+        "description": (
+            "Read lines of a file at the HEAD commit, numbered, with a pinned link (max 200 lines, "
+            "~3,500 characters per call). Use it to read a full licence, or a config file found by "
+            "search_code, before quoting it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string"},
+                "path": {"type": "string", "description": "path from the repo root, e.g. LICENSE.md"},
+                "start_line": {"type": "integer", "default": 1},
+                "end_line": {"type": "integer", "default": 120},
+            },
+            "required": ["repo", "path"],
         },
     },
     {
@@ -147,6 +240,8 @@ TOOL_SCHEMAS = [
                                 "required": ["area", "claim", "evidence_quote", "url", "source_tool"],
                             },
                         },
+                        "conditions": {"type": "array", "items": {"type": "string"},
+                                       "description": "what must hold for safe use, e.g. 'internal use only'"},
                         "open_questions": {"type": "array", "items": {"type": "string"}},
                         "recommendation": {"type": "string", "description": "1-2 plain-language sentences"},
                     },
@@ -159,7 +254,7 @@ TOOL_SCHEMAS = [
 ]
 
 # Name -> plain function for the data tools. submit_report is handled by the tools node itself.
-DATA_TOOLS = {"get_repo_info": get_repo_info}
+DATA_TOOLS = {"get_repo_info": get_repo_info, "search_code": search_code, "read_file": read_file}
 
 
 def _submit_report(report: dict) -> dict:
