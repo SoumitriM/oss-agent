@@ -260,10 +260,11 @@ def check_vulnerabilities(package: str, ecosystem: str | None = None, versions: 
     result["per_version"] = per_version
     if result["malware_versions"] and eco:
         result["previous_release"] = _previous_release(package, eco, result["malware_versions"], versions)
-    seen, unique = set(), []
+    merged = {}  # one id from two sources (OSV + GitHub): merge, so e.g. GitHub's fixed version is kept
     for x in sorted(items, key=lambda x: x["type"] != "malware"):
-        if x["id"] not in seen:
-            seen.add(x["id"])
-            unique.append(x)
-    result["items"] = unique[:12]
+        if x["id"] in merged:
+            merged[x["id"]].update({k: v for k, v in x.items() if v and not merged[x["id"]].get(k)})
+        else:
+            merged[x["id"]] = dict(x)
+    result["items"] = list(merged.values())[:12]
     return result

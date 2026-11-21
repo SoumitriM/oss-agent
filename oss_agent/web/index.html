@@ -130,6 +130,11 @@ function renderReport(r) {
   const commit = r.commit ? "@ " + r.commit.slice(0, 7) : "(no commit checked)";
   m.appendChild(el("div", "head", `${r.repo} ${commit} · checked ${r.checked_on}`));
   m.appendChild(el("div", "overall s-" + r.overall, `${ICON[r.overall]} ${r.headline || VERDICT[r.overall]}`));
+  if (r.package_location) {  // monorepo: the package is one folder of a bigger repo
+    const p = el("p", "small", "Package lives in " + r.package_location + " → ");
+    p.appendChild(link(r.package_url));
+    m.appendChild(p);
+  }
   if (r.assumptions && r.assumptions.length) m.appendChild(el("p", "small", "Assumed: " + r.assumptions.join(" · ")));
 
   let shown = AREAS;
@@ -177,7 +182,8 @@ function renderTrace(parent, step) {
     const what = t.tool ? `${t.tool} ${JSON.stringify(t.args).slice(0, 60)}` : t.detail;
     const extra = [t.tokens !== undefined ? t.tokens + " tok" : "", t.seconds !== undefined ? t.seconds + "s" : "",
                    t.tool ? t.detail : ""].filter(Boolean).join("  ");
-    return `${String(t.step).padStart(2)} ${t.node.padEnd(12)} ${what}  ${extra}`;
+    const row = `${String(t.step).padStart(2)} ${t.node.padEnd(12)} ${what}  ${extra}`;
+    return t.plan ? `${row}\n   ${t.plan_kind}: ${t.plan.replace(/\s+/g, " ")}` : row;  // the model's own plan
   });
   d.appendChild(el("pre", "", lines.join("\n")));
   parent.appendChild(d);

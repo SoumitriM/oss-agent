@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+import textwrap
 import time
 
 from dotenv import load_dotenv
@@ -18,6 +19,9 @@ def print_trace(trace: list) -> None:
         tokens = f"{t['tokens']:>6} tok" if "tokens" in t else " " * 10
         seconds = f"{t['seconds']:>5}s" if "seconds" in t else " " * 6
         print(f"  {t['step']:>2} {t['node']:<12} {what:<62} {tokens} {seconds}  {result[:70]}")
+        if t.get("plan"):  # the model's own plan / plan update, written before its tool call
+            for i, line in enumerate(textwrap.wrap(" ".join(t["plan"].split()), 100)):
+                print(f"     {(t['plan_kind'] + ':') if i == 0 else '':<13}{line}")
 
 
 def make_answer_fn(script: dict | None):

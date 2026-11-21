@@ -7,7 +7,14 @@ from oss_agent.query import as_prompt, parse_query
 def test_scoped_npm_package_with_en_dash_range():
     p = parse_query("@wppconnect-team/wppconnect@2.4.1–2.4.3 this version?")
     assert p["packages"] == [{"name": "@wppconnect-team/wppconnect", "ecosystem": "npm", "versions": ["2.4.1", "2.4.2", "2.4.3"]}]
-    assert p["repos"][0]["repo"] == "wppconnect-team/wppconnect" and p["repos"][0]["how"].startswith("probable")
+    assert p["repos"] == []  # never guessed from the scope: the npm registry is asked instead
+    assert "never guess it from the name" in as_prompt(p)
+
+
+def test_version_after_a_space_belongs_to_the_only_package():
+    p = parse_query("We use @wdio/browserstack-service 9.23.2 with BrowserStack smart selection in our CI pipeline. Is it safe?")
+    assert p["packages"] == [{"name": "@wdio/browserstack-service", "ecosystem": "npm", "versions": ["9.23.2"]}]
+    assert p["repos"] == []
 
 
 @pytest.mark.parametrize("q", ["@wppconnect-team/wppconnect@2.4.1 - 2.4.3", "@wppconnect-team/wppconnect@2.4.1..2.4.3"])

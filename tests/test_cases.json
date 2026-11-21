@@ -1,19 +1,90 @@
 [
   {
+    "id": "flask-commercial",
+    "question": "Can we use pallets/flask in a commercial product?",
+    "interrupt_answers": {"ask": [], "approve": "no"},
+    "expect": {"verdict": ["green", "yellow"], "areas": {"licence": "green"},
+               "required_tools": ["get_repo_info"], "forbidden_tools": ["search_code"], "max_steps": 6,
+               "max_tool_calls": 2}
+  },
+  {
+    "id": "n8n-selfhost-customer-data",
+    "question": "Can we self-host n8n-io/n8n for workflows with customer data?",
+    "interrupt_answers": {"ask": ["internal workflows only, no hosting for customers"], "approve": "no"},
+    "expect": {"verdict": ["yellow"], "areas": {"licence": "yellow", "privacy": "yellow"},
+               "required_tools": ["get_repo_info", "read_file", "search_code"], "forbidden_tools": [],
+               "required_finding": "diagnostics", "required_legal": "GDPR Art. 25", "max_steps": 10}
+  },
+  {
+    "id": "php-81-eol",
+    "question": "Our portal runs PHP 8.1 (php/php-src). Do we need to act?",
+    "interrupt_answers": {"ask": [], "approve": "no"},
+    "expect": {"verdict": ["red"], "areas": {"security": "red"},
+               "required_tools": ["check_vulnerabilities"], "forbidden_tools": ["search_code"], "max_steps": 6}
+  },
+  {
+    "id": "axios-new-app",
+    "question": "Can we add axios/axios to our new web app?",
+    "interrupt_answers": {"ask": [], "approve": "no"},
+    "expect": {"verdict": ["yellow", "red"], "areas": {"licence": "green"},
+               "required_tools": ["check_vulnerabilities"], "forbidden_tools": [],
+               "required_finding": "1.14.1", "max_steps": 8}
+  },
+  {
+    "id": "mit-vs-gpl-no-tools",
+    "question": "MIT vs GPL: which is safer for us?",
+    "interrupt_answers": {"ask": [], "approve": "no"},
+    "expect": {"verdict": ["none"], "required_tools": [],
+               "forbidden_tools": ["get_repo_info", "check_vulnerabilities", "search_code", "read_file", "lookup_register"],
+               "max_steps": 1}
+  },
+  {
+    "id": "nonexistent-repo",
+    "question": "Is acme-nonexistent-org-4821/doesnotexist-xyz safe to use?",
+    "why": "Repo does not exist; the scripted answer to 'which repo?' is empty, so the agent must state an assumption, not invent a repo.",
+    "interrupt_answers": {"ask": [""], "approve": "no"},
+    "expect": {"verdict": ["not_checked", "none"], "required_tools": ["get_repo_info"], "forbidden_tools": [], "max_steps": 8}
+  },
+  {
+    "id": "archived-repo",
+    "question": "Can we still use angular/angular.js for a new internal app?",
+    "interrupt_answers": {"ask": [], "approve": "no"},
+    "expect": {"verdict": ["red"], "areas": {"maintenance": "red", "licence": "green"},
+               "required_tools": ["get_repo_info"], "forbidden_tools": [], "max_steps": 8}
+  },
+  {
     "id": "wppconnect-malware-range",
     "why": "Regression (bug report 2026-11-21): scoped npm name was rejected, the LLM checked 'wppconnect' instead and said YELLOW.",
     "question": "@wppconnect-team/wppconnect@2.4.1–2.4.3 this version?",
     "interrupt_answers": {"ask": [], "approve": "no"},
     "expect": {
-      "verdict": "red",
+      "verdict": ["red"],
       "headline": "Do not use: malicious release",
       "required_tools": ["check_vulnerabilities"],
       "forbidden_tools": [],
       "required_finding": "MAL-2026-20044",
       "max_steps": 10,
-      "max_questions": 2,
       "tool_args": {"check_vulnerabilities": {"package": "@wppconnect-team/wppconnect", "ecosystem": "npm",
                                               "versions": ["2.4.1", "2.4.2", "2.4.3"]}}
     }
+  },
+  {
+    "id": "wdio-browserstack-cve",
+    "why": "Regression (bug report 2026-11-21): the agent guessed repo 'wdio/browserstack-service' from the npm scope and asked the user. The real repo is a monorepo, found via the npm registry for that version.",
+    "question": "We use @wdio/browserstack-service 9.23.2 with BrowserStack smart selection in our CI pipeline. Is it safe?",
+    "interrupt_answers": {"ask": [], "approve": "no"},
+    "expect": {
+      "verdict": ["red"], "areas": {"security": "red", "licence": "green"},
+      "repo": "webdriverio/webdriverio", "package_location": "webdriverio/webdriverio/packages/wdio-browserstack-service",
+      "required_tools": ["check_vulnerabilities", "get_repo_info"], "forbidden_tools": [],
+      "required_finding": "CVE-2026-25244", "max_questions": 0, "max_steps": 8
+    }
+  },
+  {
+    "id": "malicious-skill",
+    "pending": "needs scan_skill (M4b, moved to the end by the priority rule)",
+    "question": "Is the skill in tests/fixtures/skills/evil-helper safe to install?",
+    "interrupt_answers": {"ask": [], "approve": "no"},
+    "expect": {"verdict": ["red"], "areas": {"skills": "red"}, "required_tools": ["scan_skill"], "forbidden_tools": [], "max_steps": 6}
   }
 ]

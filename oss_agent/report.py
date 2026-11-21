@@ -61,12 +61,31 @@ def _apply_security(report: dict, tool_outputs: list, asked_text: str) -> None:
     if rule.get("headline") == rules.MALWARE_HEADLINE:  # code's words, not the LLM's, decide what to install
         report["llm_recommendation"] = report["recommendation"]
         report["recommendation"] = rules.malware_recommendation(report["per_version"])
+    for v, x in reversed(rules.severe_vulnerabilities(rule["results"])):  # severe CVEs: always a finding too
+        fix = f"; fixed in {', '.join(x['patched'])}" if x.get("patched") else ""
+        report["findings"].insert(0, {"area": "security", "claim": f"Version {v} has a {x['severity'].lower()} "
+                                      f"vulnerability ({rules.vuln_label(x)}){fix}.", "evidence_quote": x["summary"],
+                                      "url": x["url"], "verified": True, "source_tool": "check_vulnerabilities (code rule)"})
     for r in rule["results"]:  # malware is always a finding, whatever the LLM wrote
         for v, ids in r["malware_versions"].items():
             item = next(x for x in r["items"] if x["id"] in ids)
             report["findings"].insert(0, {"area": "security", "claim": f"Version {v} is a known malicious release ({', '.join(ids)}).",
                                           "evidence_quote": item["summary"], "url": item["url"], "verified": True,
                                           "source_tool": "check_vulnerabilities (code rule)"})
+
+
+def _apply_repo_lookup(report: dict, repo_info: dict | None, tool_outputs: list) -> None:
+    """Monorepo location, or, if the package's repo could not be found, say so instead of guessing."""
+    if repo_info and repo_info.get("package_directory"):
+        report["package_location"] = f"{repo_info['repo']}/{repo_info['package_directory']}"
+        report["package_url"] = repo_info["package_url"]
+    if repo_info and repo_info.get("resolved_from", {}).get("note"):
+        report["assumptions"].append(repo_info["resolved_from"]["note"])
+    failed = [o["result"]["error"] for o in tool_outputs
+              if o["tool"] == "get_repo_info" and o["args"].get("package") and not o["result"].get("ok")]
+    if failed and not repo_info:  # no repo: licence/maintenance unknown, but the security result still stands
+        for name in ("licence", "maintenance"):
+            report["areas"][name] = {"status": "not_checked", "summary": f"Not checked: {failed[0]}", "forced": True}
 
 
 def post_process(report: dict, repo_info: dict | None, tool_outputs: list = (), asked_text: str = "") -> dict:
@@ -85,6 +104,7 @@ def post_process(report: dict, repo_info: dict | None, tool_outputs: list = (), 
             report["areas"]["licence"].update(status=rule[0], rule=rule[1])
         if repo_info["archived"]:
             report["areas"]["maintenance"] = {"status": "red", "summary": "Repository is archived: no more fixes."}
+    _apply_repo_lookup(report, repo_info, tool_outputs)
     _apply_security(report, tool_outputs, asked_text or report.get("question", ""))
     previous = next((o["result"]["previous"] for o in tool_outputs
                      if o["tool"] == "lookup_register" and o["result"].get("found")), None)
@@ -105,6 +125,8 @@ def render(report: dict) -> str:
     commit = f"@ {report['commit'][:7]}" if report.get("commit") else "(no commit checked)"
     lines = [f"{report['repo']} {commit} · checked {report['checked_on']}",
              f"Overall: {ICON[report['overall']]} {report.get('headline') or VERDICT[report['overall']]}"]
+    if report.get("package_location"):
+        lines.append(f"Package lives in {report['package_location']}  → {report['package_url']}")
     if report["assumptions"]:
         lines.append("Assumed: " + " · ".join(report["assumptions"]))
     shown = AREAS

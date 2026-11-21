@@ -22,7 +22,8 @@ def call(name, args, i=0):
 
 
 REPORT = {"repo": "x", "question": "q", "findings": [], "recommendation": "ok",
-          "areas": {"licence": {"status": "yellow", "summary": "llm guess"}}}
+          "areas": {"licence": {"status": "yellow", "summary": "llm guess"}}}  # needs get_repo_info to be supported
+NOTHING_CLAIMED = {"repo": "x", "question": "q", "findings": [], "recommendation": "ok", "areas": {}}
 
 
 @pytest.fixture(autouse=True)
@@ -64,7 +65,7 @@ def test_repo_info_then_report_goes_through_checks_and_approval():
 
 
 def test_unknown_tool_is_rejected_not_run():
-    state = run([call("delete_repo", {}), call("submit_report", {"report": REPORT}, 1)])
+    state = run([call("delete_repo", {}), call("submit_report", {"report": NOTHING_CLAIMED}, 1)])
     assert "unknown tool" in [t for t in state["trace"] if t["node"] == "tools"][0]["detail"]
 
 
@@ -91,11 +92,42 @@ def test_max_steps_forces_a_partial_report():
     assert "Stopped after" in state["report"]["open_questions"][0]
 
 
+# ---------- coverage feedback loop ----------
+
+UNSUPPORTED = {**REPORT, "areas": {"security": {"status": "green", "summary": "no issues"}}}  # no check_vulnerabilities ran
+
+
+def test_gap_gets_one_feedback_round_and_the_agent_can_fix_it():
+    fixed = {**REPORT, "areas": {"security": {"status": "not_checked", "summary": "not checked"}}}
+    state = run([call("get_repo_info", {"repo": "pallets/flask"}), call("submit_report", {"report": UNSUPPORTED}, 1),
+                 call("submit_report", {"report": fixed}, 2)])
+    first_submit = [t for t in state["trace"] if t.get("tool") == "submit_report"][0]
+    assert first_submit["detail"].startswith("error") or "coverage" in str(state["messages"])
+    assert state["coverage_rounds"] == 1 and state["report"]["areas"]["security"]["status"] == "not_checked"
+    assert "coverage_gaps" not in state["report"]  # the agent fixed it itself
+
+
+def test_same_gap_twice_is_marked_not_checked_by_code():
+    state = run([call("get_repo_info", {"repo": "pallets/flask"}), call("submit_report", {"report": UNSUPPORTED}, 1),
+                 call("submit_report", {"report": UNSUPPORTED}, 2)])
+    sec = state["report"]["areas"]["security"]
+    assert sec["status"] == "not_checked" and sec["summary"].startswith("Not verified")
+    assert state["report"]["coverage_gaps"]
+
+
+def test_plan_text_is_captured_in_the_trace():
+    planned = AIMessage(content="Plan: licence only, so get_repo_info is enough.",
+                        tool_calls=[{"name": "get_repo_info", "args": {"repo": "pallets/flask"}, "id": "p1", "type": "tool_call"}])
+    state = run([planned, call("submit_report", {"report": REPORT}, 1)])
+    [entry] = [t for t in state["trace"] if t.get("plan")]
+    assert entry["plan_kind"] == "plan" and "get_repo_info is enough" in entry["plan"]
+
+
 # ---------- human in the loop (M4) ----------
 
 def test_ask_limit_is_enforced_in_code_and_unclear_answer_is_unknown():
     state = run([call("ask_user", {"question": "Internal use?"}, 1), call("ask_user", {"question": "Version?"}, 2),
-                 call("ask_user", {"question": "Hosting?"}, 3), call("submit_report", {"report": REPORT}, 4)],
+                 call("ask_user", {"question": "Hosting?"}, 3), call("submit_report", {"report": NOTHING_CLAIMED}, 4)],
                 answers=["internal only", "?"])
     asks = [t["detail"] for t in state["trace"] if t["node"] == "ask"]
     assert asks[0] == "internal only" and asks[1].startswith("UNKNOWN") and asks[2] == graph.LIMIT_REACHED
@@ -111,7 +143,7 @@ def test_approved_record_is_saved_with_decision():
 
 
 def test_rejected_record_is_not_saved():
-    state = run([call("submit_report", {"report": REPORT})], answers=["no"])
+    state = run([call("submit_report", {"report": NOTHING_CLAIMED})], answers=["no"])
     assert nodes(state)[-1] == "approve" and not register.REGISTER_PATH.exists()
 
 

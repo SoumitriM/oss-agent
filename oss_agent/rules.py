@@ -113,6 +113,12 @@ def security_rule(vuln_results: list, asked_text: str) -> dict | None:
         newest = (r.get("endoflife", {}).get("supported_cycles") or ["a supported version"])[0]
         return {"status": "red", "results": good,
                 "note": f"Version {v} reached end of life on {info['eol_date']}: no more security fixes. Upgrade to {newest}."}
+    severe = severe_vulnerabilities(good)
+    if severe:
+        v, x = severe[0]
+        fix = f" Upgrade to {', '.join(x['patched'])} or later." if x.get("patched") else " No fixed version is listed."
+        return {"status": "red", "results": good,
+                "note": f"Version {v} has a {x['severity'].lower()} known vulnerability ({vuln_label(x)}).{fix}"}
     hijacked = [x for r in good if not r["versions_checked"] for x in r["items"] if x["type"] == "malware"]
     if hijacked:  # no version given: some releases were hijacked, so versions must be pinned
         bad = ", ".join(str(a) for x in hijacked for a in x.get("affected", []) if a)
@@ -121,16 +127,43 @@ def security_rule(vuln_results: list, asked_text: str) -> dict | None:
     return {"status": None, "results": good, "note": None}  # nothing for code to decide; keep the LLM's view
 
 
+SEVERE = {"critical", "high"}
+
+
+def vuln_label(item: dict) -> str:
+    """'GHSA-5c46-x3qw-q7j7 / CVE-2026-25244': every id a reader might search for."""
+    ids = [item["id"]] + [a for a in [item.get("cve"), *item.get("aliases", [])] if a and a != item["id"]]
+    return " / ".join(dict.fromkeys(ids))
+
+
+def severe_vulnerabilities(results: list) -> list:
+    """[(version, item)] for critical/high known vulnerabilities that affect an asked version."""
+    found = []
+    for r in results:
+        items = {x["id"]: x for x in r["items"]}
+        for v, d in r["per_version"].items():
+            for vid in d["vulnerabilities"]:
+                x = items.get(vid)
+                if x and str(x.get("severity", "")).lower() in SEVERE and (v, vid) not in [(a, b["id"]) for a, b in found]:
+                    found.append((v, x))
+    return sorted(found, key=lambda f: str(f[1]["severity"]).lower() != "critical")  # critical first
+
+
 def per_version_verdicts(results: list) -> list:
     """One line per asked version, decided by code from the tool data."""
     rows = []
     for r in results:
         any_malware = bool(r["malware_versions"])
+        severe = {v: x for v, x in severe_vulnerabilities([r])[::-1]}  # reversed: critical wins per version
         for v, d in r["per_version"].items():
             if d["malware"]:
                 rows.append({"version": v, "status": "red", "detail": "malicious release: " + ", ".join(d["malware"])})
             elif d.get("eol", {}).get("is_eol"):
                 rows.append({"version": v, "status": "red", "detail": f"end of life since {d['eol']['eol_date']}"})
+            elif v in severe:
+                x = severe[v]
+                fix = f"; fixed in {', '.join(x['patched'])}" if x.get("patched") else ""
+                rows.append({"version": v, "status": "red", "detail": f"{x['severity'].lower()} vulnerability {vuln_label(x)}{fix}"})
             elif d["vulnerabilities"]:
                 rows.append({"version": v, "status": "yellow", "detail": f"{len(d['vulnerabilities'])} known vulnerabilities: "
                              + ", ".join(d["vulnerabilities"][:4])})

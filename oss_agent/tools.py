@@ -10,7 +10,7 @@ from langchain_core.tools import StructuredTool
 from oss_agent import http
 from oss_agent.register import lookup_register
 from oss_agent.rules import LEGAL_TAGS
-from oss_agent.vulns import check_vulnerabilities
+from oss_agent.vulns import NPM_RE, check_vulnerabilities
 
 GH = "https://api.github.com"
 RAW = "https://raw.githubusercontent.com"
@@ -44,7 +44,60 @@ def _find_security_policy(repo: str, sha: str) -> dict | None:
     return None
 
 
-def get_repo_info(repo: str) -> dict:
+GITHUB_IN_URL = re.compile(r"github\.com[/:]([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
+
+
+def resolve_npm_repo(package: str, version: str | None = None) -> dict:
+    """Package -> source repo from the npm registry's own metadata (repository.url + .directory).
+    Uses the ASKED version's metadata: a package can move repos ("latest" may point elsewhere).
+    Never guessed from the npm scope."""
+    if not NPM_RE.match(package or ""):
+        return {"ok": False, "error": f"'{package}' is not a valid npm package name"}
+    base = f"https://registry.npmjs.org/{quote(package, safe='@')}"  # @scope/name -> @scope%2Fname
+    tag, note = version or "latest", None if version else "no version given: repo taken from the 'latest' release; older versions may live elsewhere"
+    res = http.get(f"{base}/{quote(tag)}")
+    if not res["ok"] and version and "404" in res["error"]:  # npm removes malicious versions, so fall back
+        tag, res = "latest", http.get(f"{base}/latest")
+        note = f"version {version} is no longer on npm (removed; this often happens to malicious releases); repo taken from 'latest'"
+    if not res["ok"]:
+        return {"ok": False, "error": f"npm registry has no {package}@{tag}: {res['error']}"}
+    repo_field = res["data"].get("repository") or {}
+    if isinstance(repo_field, str):  # "github:owner/repo", "owner/repo" or a URL
+        repo_field = {"url": repo_field.removeprefix("github:")}
+    raw = repo_field.get("url", "")
+    m = GITHUB_IN_URL.search(raw)
+    if m:  # git+https://github.com/o/r.git, git://…, git+ssh://git@github.com/o/r.git, https://github.com/o/r
+        repo = f"{m.group(1)}/{m.group(2)}"
+    elif REPO_RE.match(raw):  # npm shorthand "owner/repo"
+        repo = raw
+    else:
+        return {"ok": False, "error": f"npm metadata of {package}@{tag} names no GitHub repository ({raw or 'empty'})"}
+    return {"ok": True, "repo": repo, "directory": repo_field.get("directory"), "npm_version": res["data"].get("version"),
+            "npm_licence": res["data"].get("license"), "registry_url": f"https://www.npmjs.com/package/{package}/v/{res['data'].get('version')}",
+            **({"note": note} if note else {})}
+
+
+def get_repo_info(repo: str | None = None, package: str | None = None, ecosystem: str | None = None,
+                  version: str | None = None) -> dict:
+    """GitHub facts for a repo, or for a package (its repo is looked up in the package registry first)."""
+    resolved = None
+    if package and not repo:
+        if (ecosystem or "npm").lower() != "npm":
+            return {"ok": False, "error": f"repo lookup for {ecosystem} packages is not supported yet (npm only)"}
+        resolved = resolve_npm_repo(package, version)
+        if not resolved["ok"]:
+            return {"ok": False, "error": f"could not find the source repo of {package}: {resolved['error']}"}
+        repo = resolved["repo"]
+    result = _repo_info(repo)
+    if result["ok"] and resolved:
+        result["resolved_from"] = {"package": package, **{k: v for k, v in resolved.items() if k != "ok"}}
+        if resolved.get("directory"):  # monorepo: the package is one folder of a bigger repo
+            result["package_directory"] = resolved["directory"]
+            result["package_url"] = f"https://github.com/{repo}/tree/{result['head_commit']}/{resolved['directory']}"
+    return result
+
+
+def _repo_info(repo: str) -> dict:
     if not REPO_RE.match(repo or ""):
         return {"ok": False, "error": "repo must look like owner/name"}
     meta = http.get(f"{GH}/repos/{repo}")
@@ -160,39 +213,56 @@ TOOL_SCHEMAS = [
     {
         "name": "get_repo_info",
         "description": (
-            "GitHub facts about a repository: description, archived flag, HEAD commit SHA and date, "
-            "stars, open issues, licence SPDX id, first 60 lines of the licence file, first 40 lines "
-            "of SECURITY.md, and paths of SKILL.md files. Call this first for any repo question."
+            "NEEDS: a repo (owner/name) OR a package name (+ ecosystem npm, + version). For a package, "
+            "code resolves package -> repo from the registry's own metadata (registry.npmjs.org, for that "
+            "version; never derived from the scope). "
+            "RETURNS: description, archived flag, HEAD commit SHA and date, stars, open issues, licence SPDX "
+            "id, first 60 lines of the licence file, first 40 lines of SECURITY.md (repo or org-wide), "
+            "SKILL.md paths, and for monorepos package_directory. "
+            "GOOD FOR: licence, maintenance, security policy, and confirming where a package's source lives."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {"repo": {"type": "string", "description": "owner/name, e.g. pallets/flask"}},
-            "required": ["repo"],
+            "properties": {
+                "repo": {"type": "string", "description": "owner/name, e.g. pallets/flask (only if the user named it)"},
+                "package": {"type": "string", "description": "exact package name, e.g. '@wdio/browserstack-service'"},
+                "ecosystem": {"type": "string", "description": "npm (other ecosystems: not yet)"},
+                "version": {"type": "string", "description": "the asked version: the repo can differ between versions"},
+            },
+            "required": [],
         },
     },
     {
         "name": "lookup_register",
         "description": (
-            "Our own register of earlier, approved checks. Returns the most recent earlier record for the "
-            "repo (date, commit, verdicts, conditions, decision) or found=false. Call it FIRST when a repo is named."
+            "NEEDS: a repo (owner/name). Local file only, no network, instant. "
+            "RETURNS: our most recent earlier, approved record for that repo (date, commit, verdicts, "
+            "conditions, decision) or found=false. "
+            "GOOD FOR: re-checks, so you only need to look at what changed since that date/commit."
         ),
         "input_schema": {"type": "object", "properties": {"repo": {"type": "string"}}, "required": ["repo"]},
     },
     {
         "name": "ask_user",
         "description": (
-            "Ask the decision maker ONE short question and wait for the answer. Use it only when the answer "
-            "would change a verdict (e.g. repo not found, internal use vs. hosting for customers). Max 2 per run."
+            "NEEDS: one short question for the decision maker. Pauses until they answer. Max 2 per run "
+            "(enforced by code). "
+            "RETURNS: their answer, or UNKNOWN if unclear. "
+            "GOOD FOR: facts only the user knows (their version/lockfile, internal use vs. hosting for "
+            "customers, which repo they meant if the one they named does not exist), when the answer would "
+            "change a verdict. NOT for facts a tool can look up (repo location, licence)."
         ),
         "input_schema": {"type": "object", "properties": {"question": {"type": "string"}}, "required": ["question"]},
     },
     {
         "name": "check_vulnerabilities",
         "description": (
-            "Known security problems, checked PER VERSION: OSV (incl. MAL-* malware entries) and GitHub "
-            "advisories incl. MALWARE / hijacked releases (both need an ecosystem), CVEs from NVD (by CPE), "
-            "and end-of-life status. Use the package name EXACTLY as the user / <parsed_query> gives it "
-            "(e.g. '@wppconnect-team/wppconnect'); never shorten or 'correct' it."
+            "NEEDS: only the exact package/product name (+ ecosystem for packages, + versions). NO repo needed. "
+            "Use the name EXACTLY as the user / <parsed_query> gives it (e.g. '@wppconnect-team/wppconnect'). "
+            "RETURNS, per version: OSV entries (MAL-* = published malware), GitHub advisories incl. malware / "
+            "hijacked releases (both need an ecosystem), NVD CVEs (by CPE), end-of-life status, and which "
+            "sources answered. "
+            "GOOD FOR: security of a specific version; 'do we need to act?'; adding a dependency."
         ),
         "input_schema": {
             "type": "object",
@@ -210,9 +280,10 @@ TOOL_SCHEMAS = [
     {
         "name": "search_code",
         "description": (
-            "Search code inside one GitHub repo (max 10 files, with matching fragments). Use it to find "
-            "telemetry, analytics or external endpoints, e.g. 'telemetry', 'diagnostics', 'posthog', "
-            "'N8N_DIAGNOSTICS_ENABLED'. Fragments have no line numbers: use read_file to quote exact lines."
+            "NEEDS: a repo (owner/name) and search words or identifiers. "
+            "RETURNS: up to 10 files with matching fragments (no line numbers). "
+            "GOOD FOR: finding telemetry, analytics or external endpoints (e.g. 'telemetry', 'diagnostics', "
+            "'posthog'). To quote exact lines, read the file with read_file."
         ),
         "input_schema": {
             "type": "object",
@@ -223,9 +294,11 @@ TOOL_SCHEMAS = [
     {
         "name": "read_file",
         "description": (
-            "Read lines of a file at the HEAD commit, numbered, with a pinned link (max 200 lines, "
-            "~3,500 characters per call). Use it to read a full licence, or a config file found by "
-            "search_code, before quoting it."
+            "NEEDS: a repo (owner/name) and a path from the repo root. "
+            "RETURNS: numbered lines at the HEAD commit with a pinned link (max 200 lines / ~3,500 characters "
+            "per call; a note says where to continue). "
+            "GOOD FOR: quoting exact text, e.g. a custom licence (when the SPDX id is NOASSERTION) or a "
+            "config default found by search_code."
         ),
         "input_schema": {
             "type": "object",

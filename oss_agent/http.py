@@ -19,6 +19,7 @@ ALLOWED_HOSTS = {
     "services.nvd.nist.gov",
     "endoflife.date",
     "api.osv.dev",
+    "registry.npmjs.org",  # package -> source repo lookup (GET only)
 }
 POST_HOSTS = {"api.osv.dev"}  # OSV's query API is POST-only; every other host is GET-only
 TIMEOUT_S = 15

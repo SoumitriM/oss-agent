@@ -2,7 +2,7 @@
 
 "@wppconnect-team/wppconnect@2.4.1–2.4.3 this version?" ->
   packages: [{"name": "@wppconnect-team/wppconnect", "ecosystem": "npm", "versions": ["2.4.1", "2.4.2", "2.4.3"]}]
-  repos:    [{"repo": "wppconnect-team/wppconnect", "how": "probable: from the npm scope, verify with get_repo_info"}]
+  repos:    []   (never guessed from the scope; get_repo_info(package=...) looks it up in the npm registry)
 The result is shown to the LLM as facts it must use verbatim, and used by code to catch a
 vulnerability check of a different package. Deterministic regexes only; nothing is guessed.
 """
@@ -53,7 +53,7 @@ def parse_query(text: str) -> dict:
             spec = RANGE_RE.match(spec + tail).group(0)
         versions, note = _versions(spec)
         out["packages"].append({"name": name, "ecosystem": "npm", "versions": versions})
-        out["repos"].append({"repo": name[1:], "how": "probable: from the npm scope, verify with get_repo_info"})
+        # No repo guess from the scope: @wdio/browserstack-service lives in webdriverio/webdriverio.
         out["notes"] += [note] if note else []
         rest = rest.replace(m.group(0), " ")
 
@@ -73,6 +73,8 @@ def parse_query(text: str) -> dict:
         versions, note = _versions(m.group(0)) if m else ([v.lstrip("v") for v in re.findall(rf"\b{VERSION}\b", rest)], None)
         out["versions"] = versions[:MAX_EXPAND]
         out["notes"] += [note] if note else []
+        if len(out["packages"]) == 1 and out["versions"]:  # "@wdio/browserstack-service 9.23.2": one package, so they belong to it
+            out["packages"][0]["versions"], out["versions"] = out["versions"], []
     return out
 
 
@@ -86,6 +88,8 @@ def as_prompt(parsed: dict) -> str | None:
                      f"{p['versions'] or 'none given'}")
     for r in parsed["repos"]:
         lines.append(f"- GitHub repo: {r['repo']} ({r['how']})")
+    if parsed["packages"] and not parsed["repos"]:
+        lines.append("- GitHub repo: unknown. Look it up with get_repo_info(package=..., version=...); never guess it from the name")
     if parsed["versions"]:
         lines.append(f"- versions mentioned: {parsed['versions']}")
     lines += [f"- note: {n}" for n in parsed["notes"]]

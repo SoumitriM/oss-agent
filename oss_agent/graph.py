@@ -24,7 +24,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import Command, interrupt
 
-from oss_agent import evidence, llm, query, register, report as rep
+from oss_agent import coverage, evidence, llm, query, register, report as rep
 from oss_agent.prompts import SYSTEM_PROMPT
 from oss_agent.tools import DATA_TOOLS, LC_TOOLS, TOOL_SCHEMAS
 
@@ -45,6 +45,7 @@ class State(TypedDict):
     repo_info: dict | None                      # last successful get_repo_info result
     report: dict | None                         # accepted submit_report payload
     report_retries: int                         # invalid submit_report attempts
+    coverage_rounds: int                        # coverage-gap feedback rounds used (max 1)
     nudges: int                                 # "finish with submit_report" reminders sent
     answer: str | None                         # direct answer when no tools were needed
     questions_asked: int                        # ask_user interrupts so far (max 2)
@@ -57,7 +58,7 @@ def initial_state(question: str) -> dict:
     block = query.as_prompt(parsed)
     first = f"{question}\n\n<parsed_query>\n{block}\n</parsed_query>" if block else question
     return {"question": question, "parsed": parsed, "messages": [("user", first)], "steps": 0, "tool_outputs": [],
-            "repo_info": None, "report": None, "report_retries": 0, "nudges": 0, "answer": None,
+            "repo_info": None, "report": None, "report_retries": 0, "coverage_rounds": 0, "nudges": 0, "answer": None,
             "questions_asked": 0, "decision": None,
             "trace": [{"node": "parse", "step": 0, "detail": json.dumps({k: v for k, v in parsed.items() if v})[:150]}]}
 
@@ -109,9 +110,12 @@ def build_graph(model=None):
         reply = llm.invoke(model, [SystemMessage(SYSTEM_PROMPT), *state["messages"]])
         u = reply.usage_metadata or {}
         names = [c["name"] for c in reply.tool_calls]
-        update = {"messages": [reply], "steps": state["steps"] + 1, "trace": [{
-            "node": "agent", "step": state["steps"] + 1, "detail": "→ " + ", ".join(names) if names else "no tool call",
-            "tokens": u.get("input_tokens", 0) + u.get("output_tokens", 0), "seconds": round(time.time() - started, 2)}]}
+        entry = {"node": "agent", "step": state["steps"] + 1, "detail": "→ " + ", ".join(names) if names else "no tool call",
+                 "tokens": u.get("input_tokens", 0) + u.get("output_tokens", 0), "seconds": round(time.time() - started, 2)}
+        if names and reply.text.strip():  # the model's own plan (first call) or plan update (later calls)
+            first = not any(t.get("plan") for t in state["trace"])
+            entry["plan"], entry["plan_kind"] = reply.text.strip(), "plan" if first else "plan update"
+        update = {"messages": [reply], "steps": state["steps"] + 1, "trace": [entry]}
         if not names:
             update["answer"] = reply.text
         return update
@@ -125,7 +129,12 @@ def build_graph(model=None):
                 result = {"ok": False, "error": error}
             elif call["name"] == "submit_report":
                 error = rep.validate(call["args"]["report"])
-                if error is None:
+                gaps = coverage.find_gaps(call["args"]["report"], state["tool_outputs"] + update["tool_outputs"],
+                                          state["parsed"]) if error is None else []
+                if error is None and gaps and state["coverage_rounds"] == 0:  # one feedback round, then code decides
+                    update["coverage_rounds"] = 1
+                    result = coverage.feedback(gaps)
+                elif error is None:
                     update["report"] = call["args"]["report"]
                     result = {"ok": True}
                 else:  # the LLM gets the error and one more try
@@ -158,12 +167,15 @@ def build_graph(model=None):
 
     def checks(state: State) -> dict:
         report = dict(state["report"])  # deterministic from here on, no LLM
+        gaps = coverage.find_gaps(report, state["tool_outputs"], state["parsed"])
         report["findings"] = evidence.verify(report.get("findings", []), state["tool_outputs"])
+        if gaps:  # gaps left after the feedback round: code marks those areas not_checked
+            coverage.mark_gaps(report, gaps)
         # What the user actually asked about: the question plus their answers to ask_user.
         asked_text = " ".join([state["question"]] + [t["answer"] for t in state["trace"] if t["node"] == "ask"])
         report = rep.post_process(report, state["repo_info"], state["tool_outputs"], asked_text)
         ok = sum(f["verified"] for f in report["findings"])
-        detail = f"quotes verified {ok}/{len(report['findings'])}, overall={report['overall']}"
+        detail = f"quotes verified {ok}/{len(report['findings'])}, gaps left {len(gaps)}, overall={report['overall']}"
         return {"report": report, "trace": [{"node": "checks", "step": state["steps"], "detail": detail}]}
 
     def ask(state: State) -> dict:
