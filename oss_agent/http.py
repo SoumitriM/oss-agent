@@ -18,7 +18,9 @@ ALLOWED_HOSTS = {
     "raw.githubusercontent.com",
     "services.nvd.nist.gov",
     "endoflife.date",
+    "api.osv.dev",
 }
+POST_HOSTS = {"api.osv.dev"}  # OSV's query API is POST-only; every other host is GET-only
 TIMEOUT_S = 15
 MAX_BYTES = 2 * 1024 * 1024
 CACHE_TTL_S = 24 * 3600  # online: reuse answers from the last day
@@ -43,9 +45,12 @@ def _auth_headers(host: str) -> dict:
     return {}
 
 
-def _fetch(url: str, headers: dict) -> requests.Response:
-    """One GET with a hard size cap (streamed so a huge file can't fill memory)."""
-    resp = requests.get(url, headers=headers, timeout=TIMEOUT_S, stream=True)
+def _fetch(url: str, headers: dict, body: dict | None = None) -> requests.Response:
+    """One GET (or JSON POST) with a hard size cap (streamed so a huge file can't fill memory)."""
+    if body is None:
+        resp = requests.get(url, headers=headers, timeout=TIMEOUT_S, stream=True)
+    else:
+        resp = requests.post(url, json=body, headers=headers, timeout=TIMEOUT_S, stream=True)
     body = b""
     for chunk in resp.iter_content(64 * 1024):
         body += chunk
@@ -68,11 +73,23 @@ def get(url: str, params: dict | None = None, headers: dict | None = None, as_js
     """GET a URL. Returns {"ok": True, "data": <json or text>} or {"ok": False, "error": str}."""
     if params:
         url = f"{url}?{urlencode(params)}"
+    return _request(url, headers, as_json, None)
+
+
+def post_json(url: str, body: dict) -> dict:
+    """JSON POST, only to POST_HOSTS (read-only query APIs). Same result shape as get()."""
+    if urlparse(url).hostname not in POST_HOSTS:
+        return {"ok": False, "error": f"POST not allowed to: {urlparse(url).hostname}"}
+    return _request(url, None, True, body)
+
+
+def _request(url: str, headers: dict | None, as_json: bool, body: dict | None) -> dict:
     parsed = urlparse(url)
     if parsed.scheme != "https" or parsed.hostname not in ALLOWED_HOSTS:
         return {"ok": False, "error": f"host not allowed: {parsed.hostname}"}
 
-    path = _cache_path(url)
+    # A POST body is part of the cache key: two OSV queries for different versions differ only there.
+    path = _cache_path(url if body is None else url + "#" + json.dumps(body, sort_keys=True))
     if path.exists():
         cached = json.loads(path.read_text())
         ttl = FRESH_TTL_S if "/commits/" in url else CACHE_TTL_S
@@ -84,7 +101,7 @@ def get(url: str, params: dict | None = None, headers: dict | None = None, as_js
     all_headers = {"User-Agent": "oss-due-diligence-agent", **(headers or {}), **_auth_headers(parsed.hostname)}
     for attempt in (1, 2):  # one retry, only for transient failures
         try:
-            resp = _fetch(url, all_headers)
+            resp = _fetch(url, all_headers, body)
         except requests.Timeout:
             if attempt == 2:
                 return {"ok": False, "error": f"timeout after {TIMEOUT_S}s"}

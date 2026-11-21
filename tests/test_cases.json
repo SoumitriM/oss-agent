@@ -1,0 +1,19 @@
+[
+  {
+    "id": "wppconnect-malware-range",
+    "why": "Regression (bug report 2026-11-21): scoped npm name was rejected, the LLM checked 'wppconnect' instead and said YELLOW.",
+    "question": "@wppconnect-team/wppconnect@2.4.1–2.4.3 this version?",
+    "interrupt_answers": {"ask": [], "approve": "no"},
+    "expect": {
+      "verdict": "red",
+      "headline": "Do not use: malicious release",
+      "required_tools": ["check_vulnerabilities"],
+      "forbidden_tools": [],
+      "required_finding": "MAL-2026-20044",
+      "max_steps": 10,
+      "max_questions": 2,
+      "tool_args": {"check_vulnerabilities": {"package": "@wppconnect-team/wppconnect", "ecosystem": "npm",
+                                              "versions": ["2.4.1", "2.4.2", "2.4.3"]}}
+    }
+  }
+]

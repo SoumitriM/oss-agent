@@ -24,7 +24,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import Command, interrupt
 
-from oss_agent import evidence, llm, register, report as rep
+from oss_agent import evidence, llm, query, register, report as rep
 from oss_agent.prompts import SYSTEM_PROMPT
 from oss_agent.tools import DATA_TOOLS, LC_TOOLS, TOOL_SCHEMAS
 
@@ -38,6 +38,7 @@ UNCLEAR = {"", "?", "idk", "dont know", "don't know", "not sure", "unknown", "no
 
 class State(TypedDict):
     question: str
+    parsed: dict                                # query.parse_query(): packages, repos, versions
     messages: Annotated[list, add_messages]     # conversation (system prompt added per call)
     steps: int                                  # LLM calls so far
     tool_outputs: Annotated[list, operator.add]  # full results, for quote verification (M2)
@@ -52,9 +53,13 @@ class State(TypedDict):
 
 
 def initial_state(question: str) -> dict:
-    return {"question": question, "messages": [("user", question)], "steps": 0, "tool_outputs": [],
+    parsed = query.parse_query(question)  # code reads exact names/versions; the LLM must not "simplify" them
+    block = query.as_prompt(parsed)
+    first = f"{question}\n\n<parsed_query>\n{block}\n</parsed_query>" if block else question
+    return {"question": question, "parsed": parsed, "messages": [("user", first)], "steps": 0, "tool_outputs": [],
             "repo_info": None, "report": None, "report_retries": 0, "nudges": 0, "answer": None,
-            "questions_asked": 0, "decision": None, "trace": []}
+            "questions_asked": 0, "decision": None,
+            "trace": [{"node": "parse", "step": 0, "detail": json.dumps({k: v for k, v in parsed.items() if v})[:150]}]}
 
 
 def run(app, question: str, answer_fn: Callable[[dict], str], thread_id: str = "cli") -> dict:
@@ -154,7 +159,9 @@ def build_graph(model=None):
     def checks(state: State) -> dict:
         report = dict(state["report"])  # deterministic from here on, no LLM
         report["findings"] = evidence.verify(report.get("findings", []), state["tool_outputs"])
-        report = rep.post_process(report, state["repo_info"], state["tool_outputs"])
+        # What the user actually asked about: the question plus their answers to ask_user.
+        asked_text = " ".join([state["question"]] + [t["answer"] for t in state["trace"] if t["node"] == "ask"])
+        report = rep.post_process(report, state["repo_info"], state["tool_outputs"], asked_text)
         ok = sum(f["verified"] for f in report["findings"])
         detail = f"quotes verified {ok}/{len(report['findings'])}, overall={report['overall']}"
         return {"report": report, "trace": [{"node": "checks", "step": state["steps"], "detail": detail}]}
@@ -171,7 +178,8 @@ def build_graph(model=None):
                 answer = (f"UNKNOWN: no clear answer ('{raw}'). State an assumption and continue."
                           if raw.lower() in UNCLEAR else raw)
             messages.append(ToolMessage(content=_wrap({"ok": True, "answer": answer}), tool_call_id=call["id"], name="ask_user"))
-            trace.append({"node": "ask", "step": state["steps"], "tool": "ask_user", "args": call["args"], "detail": answer[:70]})
+            trace.append({"node": "ask", "step": state["steps"], "tool": "ask_user", "args": call["args"],
+                          "detail": answer[:70], "answer": answer})
         return {"messages": messages, "questions_asked": asked, "trace": trace}
 
     def approve(state: State) -> dict:

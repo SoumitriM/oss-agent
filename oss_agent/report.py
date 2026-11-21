@@ -45,8 +45,33 @@ def _raise_status(area: dict, rule: tuple[str, str]) -> None:
         area["status"], area["summary"] = status, note  # code's words replace the LLM's
 
 
-def post_process(report: dict, repo_info: dict | None, tool_outputs: list = ()) -> dict:
-    """Code overrides the LLM where facts are deterministic."""
+def _apply_security(report: dict, tool_outputs: list, asked_text: str) -> None:
+    """Malware, end of life, failed or wrong-package checks: code decides, not the LLM."""
+    rule = rules.security_rule([o["result"] for o in tool_outputs if o["tool"] == "check_vulnerabilities"], asked_text)
+    if not rule:
+        return
+    area = report["areas"]["security"]
+    if rule.get("force"):  # check failed / wrong package: an LLM "green" must not survive
+        area.update(status="not_checked", summary=rule["note"], rule=rule["note"], forced=True)
+    elif rule["status"]:
+        _raise_status(area, (rule["status"], rule["note"]))
+    if rule.get("headline"):
+        report["headline"] = rule["headline"]
+    report["per_version"] = rules.per_version_verdicts(rule["results"])
+    if rule.get("headline") == rules.MALWARE_HEADLINE:  # code's words, not the LLM's, decide what to install
+        report["llm_recommendation"] = report["recommendation"]
+        report["recommendation"] = rules.malware_recommendation(report["per_version"])
+    for r in rule["results"]:  # malware is always a finding, whatever the LLM wrote
+        for v, ids in r["malware_versions"].items():
+            item = next(x for x in r["items"] if x["id"] in ids)
+            report["findings"].insert(0, {"area": "security", "claim": f"Version {v} is a known malicious release ({', '.join(ids)}).",
+                                          "evidence_quote": item["summary"], "url": item["url"], "verified": True,
+                                          "source_tool": "check_vulnerabilities (code rule)"})
+
+
+def post_process(report: dict, repo_info: dict | None, tool_outputs: list = (), asked_text: str = "") -> dict:
+    """Code overrides the LLM where facts are deterministic.
+    asked_text = the user's question plus their answers, to catch a vulnerability check of the wrong package."""
     for a in AREAS:  # areas the LLM skipped are explicitly "not checked"
         report["areas"].setdefault(a, {"status": "not_checked", "summary": "not checked"})
     for key in ("assumptions", "conditions", "open_questions", "findings"):
@@ -54,24 +79,20 @@ def post_process(report: dict, repo_info: dict | None, tool_outputs: list = ()) 
     if repo_info:
         report["repo"] = repo_info["repo"]
         report["commit"] = repo_info["head_commit"]  # taken from the API, not from the LLM
-        rule = rules.licence_rule(repo_info["licence_spdx"], repo_info["licence_file"] is not None)
+        text = (repo_info.get("licence_file") or {}).get("first_lines")
+        rule = rules.licence_rule(repo_info["licence_spdx"], repo_info["licence_file"] is not None, text)
         if rule:
-            report["areas"]["licence"]["status"] = rule[0]
-            report["areas"]["licence"]["rule"] = rule[1]
+            report["areas"]["licence"].update(status=rule[0], rule=rule[1])
         if repo_info["archived"]:
             report["areas"]["maintenance"] = {"status": "red", "summary": "Repository is archived: no more fixes."}
-    for out in tool_outputs:  # end-of-life versions and malware releases: code decides
-        if out["tool"] == "check_vulnerabilities" and out["result"].get("ok"):
-            rule = rules.vulnerability_rule(out["result"])
-            if rule:
-                _raise_status(report["areas"]["security"], rule)
+    _apply_security(report, tool_outputs, asked_text or report.get("question", ""))
     previous = next((o["result"]["previous"] for o in tool_outputs
                      if o["tool"] == "lookup_register" and o["result"].get("found")), None)
     if previous:  # re-check: compare with the last approved record
         report["previous"] = previous
         for name, area in report["areas"].items():
             old = previous["areas"].get(name)
-            if area["status"] == "not_checked" and old and old["status"] != "not_checked":
+            if area["status"] == "not_checked" and not area.get("forced") and old and old["status"] != "not_checked":
                 area.update(status=old["status"], summary=old["summary"], carried_over=previous["checked_on"])
         report["changed_areas"] = [a for a in AREAS if previous["areas"].get(a, {}).get("status") != report["areas"][a]["status"]]
     report["legal"] = rules.legal_refs(report["findings"], report["areas"])
@@ -83,7 +104,7 @@ def post_process(report: dict, repo_info: dict | None, tool_outputs: list = ()) 
 def render(report: dict) -> str:
     commit = f"@ {report['commit'][:7]}" if report.get("commit") else "(no commit checked)"
     lines = [f"{report['repo']} {commit} · checked {report['checked_on']}",
-             f"Overall: {ICON[report['overall']]} {VERDICT[report['overall']]}"]
+             f"Overall: {ICON[report['overall']]} {report.get('headline') or VERDICT[report['overall']]}"]
     if report["assumptions"]:
         lines.append("Assumed: " + " · ".join(report["assumptions"]))
     shown = AREAS
@@ -109,6 +130,9 @@ def render(report: dict) -> str:
             mark = "✔" if f.get("verified") else "⚠ unverified"
             lines.append(f"{'':<14}\"{quote[:90]}{'…' if len(quote) > 90 else ''}\"")
             lines.append(f"{'':<14}→ {f['url']} {mark}")
+        if name == "security":  # per-version verdicts, decided by code
+            for row in report.get("per_version", []):
+                lines.append(f"{'':<14}{ICON[row['status']]} {row['version']}: {row['detail']}")
     for label, items in (("Conditions", report["conditions"]), ("Open questions", report["open_questions"])):
         if items:  # keep the terminal view short; --json has everything
             more = f" (+{len(items) - 3} more in --json)" if len(items) > 3 else ""

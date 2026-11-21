@@ -189,19 +189,22 @@ TOOL_SCHEMAS = [
     {
         "name": "check_vulnerabilities",
         "description": (
-            "Known security problems for a product: CVEs from NVD (matched by CPE vendor:product, "
-            "version ranges checked), GitHub advisories incl. MALWARE / hijacked releases (needs an "
-            "ecosystem), and end-of-life status from endoflife.date. Give a version for an exact check."
+            "Known security problems, checked PER VERSION: OSV (incl. MAL-* malware entries) and GitHub "
+            "advisories incl. MALWARE / hijacked releases (both need an ecosystem), CVEs from NVD (by CPE), "
+            "and end-of-life status. Use the package name EXACTLY as the user / <parsed_query> gives it "
+            "(e.g. '@wppconnect-team/wppconnect'); never shorten or 'correct' it."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "product": {"type": "string", "description": "CPE / package name, lowercase, e.g. 'php', 'axios'"},
-                "vendor": {"type": "string", "description": "CPE vendor if different from product, e.g. 'nodejs' for node.js"},
-                "ecosystem": {"type": "string", "description": "package ecosystem: npm, pip, maven, go, rubygems, nuget, composer, rust"},
-                "version": {"type": "string", "description": "e.g. '8.1' or '1.14.1'"},
+                "package": {"type": "string", "description": "exact package/product name, e.g. '@scope/name', 'axios', 'php'"},
+                "ecosystem": {"type": "string", "description": "npm, pypi, maven, go, rubygems, nuget, composer, rust (omit for non-packages like php)"},
+                "versions": {"type": "array", "items": {"type": "string"}, "maxItems": 10,
+                             "description": "each exact version to check, e.g. ['2.4.1', '2.4.2', '2.4.3']"},
+                "cpe_vendor": {"type": "string", "description": "NVD CPE vendor if it differs, e.g. 'nodejs'"},
+                "cpe_product": {"type": "string", "description": "NVD CPE product if it differs from the package name"},
             },
-            "required": ["product"],
+            "required": ["package"],
         },
     },
     {

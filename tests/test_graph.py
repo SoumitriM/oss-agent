@@ -45,7 +45,7 @@ def run(replies, answers=()):
 
 
 def nodes(state):
-    return [t["node"] for t in state["trace"]]
+    return [t["node"] for t in state["trace"] if t["node"] != "parse"]
 
 
 def test_direct_answer_ends_without_tools_or_approval():
@@ -65,7 +65,7 @@ def test_repo_info_then_report_goes_through_checks_and_approval():
 
 def test_unknown_tool_is_rejected_not_run():
     state = run([call("delete_repo", {}), call("submit_report", {"report": REPORT}, 1)])
-    assert "unknown tool" in state["trace"][1]["detail"]
+    assert "unknown tool" in [t for t in state["trace"] if t["node"] == "tools"][0]["detail"]
 
 
 def test_stopping_after_tools_gets_one_nudge_then_report():

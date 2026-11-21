@@ -57,12 +57,15 @@ Keep it simple and minimal. No production polish.
 ```
 oss_agent/
   main.py       # CLI: python -m oss_agent "question" [--trace] [--offline] [--json out.json] [--show-graph]
+  server.py     # local chat UI backend: python -m oss_agent.server -> http://127.0.0.1:8000 (stdlib http.server)
+  web/index.html  # chat page: plain HTML/JS, no build step; ask/approve interrupts become chat turns and buttons
   graph.py      # LangGraph: State, nodes, edges, compile()  ← the heart of the demo
   llm.py        # get_model() -> LangChain chat model with tools bound
   tools.py      # plain tool functions + thin LangChain tool schemas
   http.py       # one GET helper: allowlist, timeout, size cap, disk cache
   rules.py      # deterministic logic: licence table, verdicts, GDPR/CRA mapping
-  vulns.py      # check_vulnerabilities: NVD + GitHub advisories + endoflife (M3)
+  vulns.py      # check_vulnerabilities: OSV + GitHub advisories + NVD + endoflife, per version (M3)
+  query.py      # query normalising: exact package names, repos, versions/ranges from the question
   evidence.py   # quote verification + pinned GitHub links            (M2)
   report.py     # report schema, validation, post-processing, rendering
   prompts.py    # system prompt
@@ -166,7 +169,18 @@ All tools are read-only, return JSON-serialisable dicts and never raise:
 success → `{"ok": true, ...}`, failure → `{"ok": false, "error": "<short reason>"}`.
 
 1. **get_repo_info(repo)** (M1). Uses the GitHub API to fetch: description, archived flag, default branch, HEAD SHA and date, stars, open issues, licence SPDX id, first 60 lines of the licence file (pinned link), first 40 lines of SECURITY.md (repo locations, then the org-wide `{owner}/.github`), and SKILL.md paths (via code search, max 50; git trees of big repos exceed the size cap).
-2. **check_vulnerabilities(product, vendor?, ecosystem?, version?)** (M3, in `vulns.py`). It combines three sources:
+2. **check_vulnerabilities(package, ecosystem?, versions?, cpe_vendor?, cpe_product?)** (M3, revised after the wppconnect bug, in `vulns.py`).
+   - **Package names** are validated per ecosystem, never with the repo regex:
+     - npm: `^(@[a-z0-9-~][a-z0-9-._~]*/)?[a-z0-9-~][a-z0-9-._~]*$`;
+     - PyPI: PEP 508 names;
+     - others: a generic rule.
+
+     The name is checked **exactly as given** (`package_checked`). An invalid name → `{"ok": false, "error"}`, never a substitute.
+   - **Each version is checked separately** (max 10), giving `per_version`, `malware_versions`, and a `sources` status per source (`ok` / `skipped: …` / `unavailable: …`).
+   - **OSV:** `POST https://api.osv.dev/v1/query` once per version. `MAL-*` ids → type `malware`.
+   - **Previous release:** when malware is found in x.y.z, x.y.(z−1) is also checked (`previous_release`) as a candidate to pin.
+
+   The original three sources:
    - **NVD:** match by CPE `virtualMatchString=cpe:2.3:a:{vendor}:{product}` (`vendor` defaults to `product`), take the **newest 100** CVEs (a count call, then the last page, because NVD sorts oldest first), and, if a version is given, keep only CVEs whose vulnerable CPE range includes it (checked locally with `packaging`). Max 10 results, newest first (6 when advisories are included).
      *Changed from v2:* keyword search was dropped, because "php" matches 13,256 CVEs, mostly PHP web apps, while CPE `php:php` matches 760.
    - **GitHub global advisories** (needs `ecosystem`), with `type=malware` and `type=reviewed` both filtered by `affects=pkg[@version]`, to catch hijacked releases without a CVE.
@@ -198,7 +212,8 @@ success → `{"ok": true, ...}`, failure → `{"ok": false, "error": "<short rea
    It's optional, and the `checks` node defaults it to `[]`. It is shown in the terminal output.
 
 ## 8. Deterministic rules (rules.py / evidence.py): code, not the LLM
-- **Licence table by SPDX id:**
+- **Licence table by SPDX id** (normalised first: case-insensitive, with `-only`, `-or-later` and `+` stripped, so `LGPL-3.0-or-later` → `LGPL-3.0`).
+  For `NOASSERTION`, a standard licence is recognised from its header line (GNU LGPL/GPL/AGPL v2/v3, Apache 2.0, MPL 2.0):
   - permissive (MIT, Apache-2.0, BSD-*) → green;
   - weak copyleft (LGPL, MPL) → green with a note;
   - strong copyleft (GPL) → yellow;
@@ -211,10 +226,23 @@ success → `{"ok": true, ...}`, failure → `{"ok": false, "error": "<short rea
   1. a file excerpt → `#L<a>-L<b>`;
   2. an item with its own `url` (search hit, CVE, advisory, endoflife) → that URL;
   3. repo metadata → the repo page.
-- **Vulnerability rules** (code can only make the security area worse, never better):
-  - end-of-life version → red, "upgrade to <newest supported cycle>";
-  - malware advisory for the given version → red;
-  - malware advisories but no version given → yellow, naming the bad releases.
+- **Security rules** (`rules.security_rule`, applied over all `check_vulnerabilities` results):
+  - **check failed, no source answered, or the wrong package was checked** → security forced to `not_checked` (even over an LLM "green"), headline **"Security could not be verified"**, never "Usable".
+    "Wrong package" means: if the question or the user's answers contain a scoped npm name, only that exact name counts; otherwise the checked name must appear in the question or answers.
+  - **a malware entry for any asked version** → security red, overall red, headline **"Do not use: malicious release"**. Code also adds a verified finding naming the ids (e.g. `MAL-2026-20044`) and **writes the recommendation itself** (`malware_recommendation`); the LLM's text is kept as `llm_recommendation`.
+  - **end-of-life version** → red, "upgrade to <newest supported cycle>".
+  - **malware advisories but no version given** → yellow, naming the bad releases.
+  - **Per-version verdicts** (`per_version_verdicts`):
+    - malware → red;
+    - EOL → red;
+    - known vulnerabilities → yellow;
+    - no advisory, next to a malicious version → yellow "not proven clean";
+    - otherwise green;
+    - the previous release, if clean → green "candidate to pin".
+- **Query normalising** (`query.py`): regexes extract scoped and plain packages with `@version`/ranges (`–`, `-`, `..`, `to`), `owner/name` repos and GitHub URLs, loose versions and ecosystem words.
+  - Patch ranges inside one minor version are expanded (`2.4.1–2.4.3` → 3 versions, max 10); wider ranges keep only both ends.
+  - A scoped npm name gives a *probable* repo (`@scope/name` → `scope/name`).
+  - The result goes into the first user message as `<parsed_query>`, which the LLM must use verbatim.
 - **Overall verdict** = the worst area (red > yellow > green).
 - **GDPR/CRA mapping** (a fixed dict with EUR-Lex links). The LLM sets fact `tags` on findings; code maps them,
   **only for verified findings**:
@@ -268,6 +296,7 @@ Recommendation: ...
 | M2 | `read_file`, `search_code`, `evidence.py` (quote verification, pinned links) | "Can we self-host n8n-io/n8n for workflows with customer data?" |
 | M3 | `check_vulnerabilities` (NVD, GitHub advisories incl. malware, endoflife) and the GDPR/CRA mapping | "Our portal runs PHP 8.1 (php/php-src). Do we need to act?"; "Can we add axios/axios to our new web app?" |
 | M4 ✔ | Human in the loop: `ask` (`ask_user`, max 2), `approve`, `register`, `lookup_register` (in `register.py`). | The agent asks before guessing a repo name. **Run 2, "Re-check n8n-io/n8n", shows only what changed since run 1.** |
+| M4c ✔ | Simple local chat UI: `server.py` (stdlib only, 127.0.0.1 only) with `POST /api/start {question}` and `POST /api/resume {thread_id, answer}`; `web/index.html` renders report cards, ✔/⚠ evidence, the re-check view, ask turns, approve/reject buttons with a comment, and a collapsible trace. All tool text is rendered with `textContent`; only `https://` links are clickable. | Same demos in the browser |
 | M4b | (moved to the end by the priority rule) `scan_skill` + a local fixture "malicious" skill (harmless fake payload: curl to example.com, a reference to `~/.ssh`, a hidden instruction in SKILL.md). | The agent flags the skill and doesn't obey it. |
 | M5 | Robustness: all edge cases, MAX_STEPS, partial reports, `--offline` replay, fixtures for all demos | |
 | M6 | Evaluation: `tests/test_cases.json` (~8 cases, each with scripted `interrupt_answers`) and `tests/eval.py`. Each case runs 3× offline and checks: required/forbidden tools, steps, **questions asked ≤ 2**, quotes verified, verdict. Prints a pass rate and average tokens and seconds. | |
@@ -280,7 +309,8 @@ Before the submission, the code default for `LLM_PROVIDER` switches to `anthropi
 
 ## 12. Security and scope limits
 - Repo input must match `^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`.
-- HTTP allowlist: `api.github.com`, `raw.githubusercontent.com`, `services.nvd.nist.gov`, `endoflife.date`.
+- HTTP allowlist: `api.github.com`, `raw.githubusercontent.com`, `services.nvd.nist.gov`, `endoflife.date`, `api.osv.dev`.
+  POST is allowed only to `api.osv.dev`, a read-only query API; the POST body is part of the cache key.
 - 15 s timeouts, one retry on 5xx or timeout, 2 MB response cap.
 - Never clone, install or execute anything from the assessed repo.
 - No secrets in prompts, logs or fixtures.
@@ -305,6 +335,11 @@ Before the submission, the code default for `LLM_PROVIDER` switches to `anthropi
 17. User rejects saving → the record is shown, not saved.
 18. `register.jsonl` missing or corrupt → treated as empty, with a warning.
 19. Ctrl+C during an interrupt → clean exit, nothing saved.
+20. Scoped npm package (`@scope/name`) → accepted and checked exactly. An invalid name → error, never a "corrected" name.
+21. Vulnerability check failed or checked a different package → security `not_checked`, headline "Security could not be verified".
+22. Version range (`2.4.1–2.4.3`) → each version checked and reported separately.
+23. Malware in one version of a range → whole answer red. Other versions are "not proven clean", and the previous release is offered as a candidate to pin.
+    *Regression case:* `tests/test_cases.json` → `wppconnect-malware-range`.
 
 ## 14. Fallbacks
 | Failure | Handling |

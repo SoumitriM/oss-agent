@@ -42,6 +42,19 @@ def test_head_commit_cache_expires_quickly_online(monkeypatch):
     assert http.get(url)["ok"] is False  # 10 min old -> not reused, a fresh fetch was attempted
 
 
+def test_post_only_allowed_to_osv():
+    assert http.post_json("https://api.github.com/graphql", {})["error"].startswith("POST not allowed")
+
+
+def test_post_body_is_part_of_cache_key():
+    url, body = "https://api.osv.dev/v1/query", {"version": "2.4.1"}
+    key = url + "#" + json.dumps(body, sort_keys=True)
+    http._cache_path(key).write_text(json.dumps({"url": url, "fetched_at": time.time(), "data": {"vulns": [1]}}))
+    http.OFFLINE = True
+    assert http.post_json(url, body)["data"] == {"vulns": [1]}
+    assert http.post_json(url, {"version": "2.4.0"})["ok"] is False  # different body, not cached
+
+
 def test_params_are_part_of_cache_key():
     url = "https://endoflife.date/api/php.json"
     http._cache_path(url + "?v=1").write_text(json.dumps({"url": url, "fetched_at": time.time(), "data": "one"}))
