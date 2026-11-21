@@ -35,6 +35,13 @@ def test_offline_serves_old_cache_entry():
     assert http.get(url) == {"ok": True, "data": {"x": 1}, "cached": True}
 
 
+def test_head_commit_cache_expires_quickly_online(monkeypatch):
+    url = "https://api.github.com/repos/a/b/commits/HEAD"
+    http._cache_path(url).write_text(json.dumps({"url": url, "fetched_at": time.time() - 600, "data": "old"}))
+    monkeypatch.setattr(http, "_fetch", lambda *a: (_ for _ in ()).throw(http.requests.Timeout()))
+    assert http.get(url)["ok"] is False  # 10 min old -> not reused, a fresh fetch was attempted
+
+
 def test_params_are_part_of_cache_key():
     url = "https://endoflife.date/api/php.json"
     http._cache_path(url + "?v=1").write_text(json.dumps({"url": url, "fetched_at": time.time(), "data": "one"}))

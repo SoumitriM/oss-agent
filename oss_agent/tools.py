@@ -8,6 +8,7 @@ from urllib.parse import quote
 from langchain_core.tools import StructuredTool
 
 from oss_agent import http
+from oss_agent.register import lookup_register
 from oss_agent.rules import LEGAL_TAGS
 from oss_agent.vulns import check_vulnerabilities
 
@@ -170,6 +171,22 @@ TOOL_SCHEMAS = [
         },
     },
     {
+        "name": "lookup_register",
+        "description": (
+            "Our own register of earlier, approved checks. Returns the most recent earlier record for the "
+            "repo (date, commit, verdicts, conditions, decision) or found=false. Call it FIRST when a repo is named."
+        ),
+        "input_schema": {"type": "object", "properties": {"repo": {"type": "string"}}, "required": ["repo"]},
+    },
+    {
+        "name": "ask_user",
+        "description": (
+            "Ask the decision maker ONE short question and wait for the answer. Use it only when the answer "
+            "would change a verdict (e.g. repo not found, internal use vs. hosting for customers). Max 2 per run."
+        ),
+        "input_schema": {"type": "object", "properties": {"question": {"type": "string"}}, "required": ["question"]},
+    },
+    {
         "name": "check_vulnerabilities",
         "description": (
             "Known security problems for a product: CVEs from NVD (matched by CPE vendor:product, "
@@ -275,20 +292,20 @@ TOOL_SCHEMAS = [
     },
 ]
 
-# Name -> plain function for the data tools. submit_report is handled by the tools node itself.
+# Name -> plain function for the data tools. submit_report and ask_user are handled by graph nodes.
 DATA_TOOLS = {"get_repo_info": get_repo_info, "search_code": search_code, "read_file": read_file,
-              "check_vulnerabilities": check_vulnerabilities}
+              "check_vulnerabilities": check_vulnerabilities, "lookup_register": lookup_register}
 
 
-def _submit_report(report: dict) -> dict:
-    return {"ok": True}  # never run: the graph's tools node validates and stores the report
+def _handled_by_graph(**kwargs) -> dict:
+    return {"ok": True}  # never run: submit_report -> tools node, ask_user -> ask node
 
 
 # Thin LangChain wrappers: they only carry name, description and JSON schema to bind_tools().
 # The graph calls the plain functions above, so tools stay testable without LangChain.
 LC_TOOLS = [
     StructuredTool.from_function(
-        func={**DATA_TOOLS, "submit_report": _submit_report}[s["name"]],
+        func=DATA_TOOLS.get(s["name"], _handled_by_graph),
         name=s["name"], description=s["description"], args_schema=s["input_schema"],
     )
     for s in TOOL_SCHEMAS

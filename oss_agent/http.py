@@ -22,6 +22,7 @@ ALLOWED_HOSTS = {
 TIMEOUT_S = 15
 MAX_BYTES = 2 * 1024 * 1024
 CACHE_TTL_S = 24 * 3600  # online: reuse answers from the last day
+FRESH_TTL_S = 300  # "what is HEAD now?" must stay fresh, or a re-check would miss new commits
 CACHE_DIR = Path(os.getenv("OSS_CACHE_DIR", Path(__file__).parent.parent / "tests" / "fixtures" / "http_cache"))
 
 # Set by main.py --offline: serve only from cache, never touch the network.
@@ -74,7 +75,8 @@ def get(url: str, params: dict | None = None, headers: dict | None = None, as_js
     path = _cache_path(url)
     if path.exists():
         cached = json.loads(path.read_text())
-        if OFFLINE or time.time() - cached["fetched_at"] < CACHE_TTL_S:
+        ttl = FRESH_TTL_S if "/commits/" in url else CACHE_TTL_S
+        if OFFLINE or time.time() - cached["fetched_at"] < ttl:
             return {"ok": True, "data": cached["data"], "cached": True}
     if OFFLINE:
         return {"ok": False, "error": "offline mode: no cached response for this request"}

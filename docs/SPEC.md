@@ -132,9 +132,19 @@ and resumes the graph with `Command(resume=...)`.
 | `register` | After approval | Appends the final record (with decision, timestamp and commit SHA) to a local `register.jsonl`, a simple "approved components" register. Read-only towards the internet. If the user rejects saving, the record is shown but not saved. |
 
 **Offline and eval mode:** with `--offline`, and in `eval.py`, interrupts are answered from
-**scripted answers** stored in the test case (`interrupt_answers`). When no scripted answer
-exists, the default is **reject** (for `approve`) or an empty answer (for `ask`). Ctrl+C during
-an interrupt exits cleanly and saves nothing.
+**scripted answers** stored in the test case as `interrupt_answers: {"ask": ["…", "…"], "approve": "yes …" | "no"}`.
+Question and approval answers are kept separate, so an extra or missing question can never use up the approval.
+When no scripted answer exists, the default is **reject** (for `approve`) or an empty answer (for `ask`).
+The same script also applies whenever stdin is not a terminal.
+
+On the CLI: `--answer TEXT` (repeatable, for questions) and `--approve TEXT` (e.g. `"yes internal only"`).
+The rendered record is shown before the approval prompt. Ctrl+C or Ctrl+D during an interrupt exits
+cleanly and saves nothing.
+
+**Re-check view (code, not the LLM):** when `lookup_register` found an earlier record:
+- an area the agent did not re-check this time is **carried over** from that record and marked `[from <date>]`;
+- `changed_areas` lists the areas whose status differs from the earlier record;
+- the terminal shows a `Re-check of <date> (same commit | was @ <sha>)` line, the changed areas in full, and the unchanged ones on a single line.
 
 ## 6. LLM (llm.py)
 `get_model()` returns a LangChain chat model with tools bound, chosen by `LLM_PROVIDER`:
@@ -257,7 +267,8 @@ Recommendation: ...
 | **M1b** | **Migrate to LangGraph.** No new features: `graph.py` (State, agent, custom tools, checks, force_report, routing), `get_model()`, LangChain tool wrappers, `main.py` runs the graph, plus `--show-graph`. Delete `agent.py`. | Flask, same output |
 | M2 | `read_file`, `search_code`, `evidence.py` (quote verification, pinned links) | "Can we self-host n8n-io/n8n for workflows with customer data?" |
 | M3 | `check_vulnerabilities` (NVD, GitHub advisories incl. malware, endoflife) and the GDPR/CRA mapping | "Our portal runs PHP 8.1 (php/php-src). Do we need to act?"; "Can we add axios/axios to our new web app?" |
-| M4 | Human in the loop: `ask` (`ask_user`, max 2), `approve`, `register`, `lookup_register`. Plus `scan_skill` and a local fixture "malicious" skill (harmless fake payload: curl to example.com, a reference to `~/.ssh`, a hidden instruction in SKILL.md). | The agent asks before guessing a repo name. **Run 2, "Re-check n8n-io/n8n", shows only what changed since run 1.** The agent flags the skill and doesn't obey it. |
+| M4 ✔ | Human in the loop: `ask` (`ask_user`, max 2), `approve`, `register`, `lookup_register` (in `register.py`). | The agent asks before guessing a repo name. **Run 2, "Re-check n8n-io/n8n", shows only what changed since run 1.** |
+| M4b | (moved to the end by the priority rule) `scan_skill` + a local fixture "malicious" skill (harmless fake payload: curl to example.com, a reference to `~/.ssh`, a hidden instruction in SKILL.md). | The agent flags the skill and doesn't obey it. |
 | M5 | Robustness: all edge cases, MAX_STEPS, partial reports, `--offline` replay, fixtures for all demos | |
 | M6 | Evaluation: `tests/test_cases.json` (~8 cases, each with scripted `interrupt_answers`) and `tests/eval.py`. Each case runs 3× offline and checks: required/forbidden tools, steps, **questions asked ≤ 2**, quotes verified, verdict. Prints a pass rate and average tokens and seconds. | |
 | M7 | README: setup, architecture diagram, design decisions, limits and future work, 3-sentence summary | |

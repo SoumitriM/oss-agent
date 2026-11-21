@@ -65,6 +65,15 @@ def post_process(report: dict, repo_info: dict | None, tool_outputs: list = ()) 
             rule = rules.vulnerability_rule(out["result"])
             if rule:
                 _raise_status(report["areas"]["security"], rule)
+    previous = next((o["result"]["previous"] for o in tool_outputs
+                     if o["tool"] == "lookup_register" and o["result"].get("found")), None)
+    if previous:  # re-check: compare with the last approved record
+        report["previous"] = previous
+        for name, area in report["areas"].items():
+            old = previous["areas"].get(name)
+            if area["status"] == "not_checked" and old and old["status"] != "not_checked":
+                area.update(status=old["status"], summary=old["summary"], carried_over=previous["checked_on"])
+        report["changed_areas"] = [a for a in AREAS if previous["areas"].get(a, {}).get("status") != report["areas"][a]["status"]]
     report["legal"] = rules.legal_refs(report["findings"], report["areas"])
     report["overall"] = rules.overall(report["areas"])
     report["checked_on"] = date.today().isoformat()
@@ -77,11 +86,22 @@ def render(report: dict) -> str:
              f"Overall: {ICON[report['overall']]} {VERDICT[report['overall']]}"]
     if report["assumptions"]:
         lines.append("Assumed: " + " · ".join(report["assumptions"]))
+    shown = AREAS
+    prev = report.get("previous")
+    if prev:  # re-check: show only what changed; everything else on one line
+        same = "same commit" if prev.get("commit") == report.get("commit") else f"was @ {(prev.get('commit') or '?')[:7]}"
+        lines.append(f"Re-check of {prev['checked_on']} ({same}, previous overall {ICON.get(prev['overall'], '?')})")
+        shown = report["changed_areas"]
+        unchanged = [f"{a.upper()} {ICON[report['areas'][a]['status']]}" for a in AREAS if a not in shown]
+        lines.append(("Changed: " + ", ".join(a.upper() for a in shown)) if shown else "Changed: nothing")
+        if unchanged:
+            lines.append("Unchanged since last check: " + " · ".join(unchanged))
     lines.append("")
-    for name in AREAS:
+    for name in shown:
         area = report["areas"][name]
         articles = ", ".join(r["article"] for r in report.get("legal", []) if r["area"] == name)
-        lines.append(f"{name.upper():<12} {ICON[area['status']]} {area['summary']}" + (f"  ({articles})" if articles else ""))
+        lines.append(f"{name.upper():<12} {ICON[area['status']]} {area['summary']}" + (f"  ({articles})" if articles else "")
+                     + (f"  [from {area['carried_over']}]" if area.get("carried_over") else ""))
         findings = [f for f in report["findings"] if f.get("area") == name]
         # One evidence line per area: the LLM's most important VERIFIED finding (sort is stable).
         for f in sorted(findings, key=lambda f: not f.get("verified"))[:1]:

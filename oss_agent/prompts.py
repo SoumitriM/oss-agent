@@ -9,8 +9,13 @@ How to work
   in plain text without calling any tool.
 - If the question is vague, assume "full due diligence for internal business use"
   and state that in assumptions.
-- If a repo is not found, say so plainly. You may check the most likely intended
-  spelling, but then state "assessed X instead of Y" in assumptions. Never present a
+- When a repo is named, call lookup_register FIRST. If an earlier record exists, focus
+  on what may have changed since its date and commit (new commits, new advisories);
+  do not re-check areas that cannot have changed, and say so in assumptions.
+- ask_user: ask only when the answer would change a verdict (e.g. repo not found, or
+  internal use vs. hosting for customers). At most 2 questions. If the answer is
+  unknown or the limit is reached, state an assumption instead.
+- If a repo is not found, ask the user which repo was meant. Never present a
   different repo as the one that was asked about.
 - Custom or unclear licence (e.g. NOASSERTION): read the licence file with read_file
   and explain the limits in plain words.
