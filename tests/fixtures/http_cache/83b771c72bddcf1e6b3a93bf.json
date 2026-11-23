@@ -1,0 +1,1 @@
+{"url": "https://services.nvd.nist.gov/rest/json/cves/2.0?virtualMatchString=cpe%3A2.3%3Aa%3Arecharts%3Arecharts&resultsPerPage=100&startIndex=0", "fetched_at": 1795285715.8698628, "data": {"resultsPerPage": 0, "startIndex": 0, "totalResults": 0, "format": "NVD_CVE", "version": "2.0", "timestamp": "2026-11-21T18:28:35.823", "vulnerabilities": []}}

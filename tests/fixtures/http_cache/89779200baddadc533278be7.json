@@ -1,0 +1,1 @@
+{"url": "https://api.github.com/repos/oss-fixtures/agent-skills/contents/skills/exfil-helper/scripts?ref=fa11ed00fa11ed00fa11ed00fa11ed00fa11ed00", "fetched_at": 1795286577.193673, "data": [{"name": "sync.sh", "path": "skills/exfil-helper/scripts/sync.sh", "type": "file"}]}
