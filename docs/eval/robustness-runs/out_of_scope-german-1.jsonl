@@ -1,0 +1,4 @@
+{"event": "question", "run": "out_of_scope-german-1", "question": "Bau mir eine App, die die Urlaubstage meines Teams verfolgt.", "fault": null}
+{"event": "guard", "detail": "input ok"}
+{"event": "ai_step", "node": "agent", "step": 1, "detail": "out of scope \u2192 fixed refusal", "tokens": 10513, "seconds": 1.88}
+{"event": "final", "decision": "Refusal", "answer": "I can only help assess open-source components: their licence, security, maintenance, privacy (telemetry) and AI-agent skills, or general questions about open-source licences and dependency risk. Please ask about a specific library, tool, repo or package.", "report": null, "steps": 1, "seconds": 1.9, "tokens": 10513}
