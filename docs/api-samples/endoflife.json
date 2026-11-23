@@ -1,0 +1,25 @@
+{
+  "url": "https://endoflife.date/api/react.json",
+  "note": "real response recorded by oss_agent/http.py (no auth headers are stored); long lists and strings trimmed for reading",
+  "response": [
+    {
+      "cycle": "19",
+      "releaseDate": "2024-12-05",
+      "eol": false,
+      "latest": "19.3.1",
+      "latestReleaseDate": "2026-10-14",
+      "lts": false,
+      "support": true
+    },
+    {
+      "cycle": "18",
+      "releaseDate": "2022-03-29",
+      "eol": false,
+      "latest": "18.3.1",
+      "latestReleaseDate": "2024-04-26",
+      "lts": false,
+      "support": "2024-12-05"
+    },
+    "... 3 more items trimmed"
+  ]
+}

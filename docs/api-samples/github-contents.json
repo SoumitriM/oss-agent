@@ -1,0 +1,39 @@
+{
+  "url": "https://api.github.com/repos/minimistjs/minimist/contents?ref=ecfdaea23e7931c0d529c52b743c711c3278a8ce",
+  "note": "real response recorded by oss_agent/http.py (no auth headers are stored); long lists and strings trimmed for reading",
+  "response": [
+    {
+      "name": ".eslintrc",
+      "path": ".eslintrc",
+      "sha": "09e4713a891c701a65179a472133817cb00e04c0",
+      "size": 598,
+      "url": "https://api.github.com/repos/minimistjs/minimist/contents/.eslintrc?ref=ecfdaea23e7931c0d529c52b743c711c3278a8ce",
+      "html_url": "https://github.com/minimistjs/minimist/blob/ecfdaea23e7931c0d529c52b743c711c3278a8ce/.eslintrc",
+      "git_url": "https://api.github.com/repos/minimistjs/minimist/git/blobs/09e4713a891c701a65179a472133817cb00e04c0",
+      "download_url": "https://raw.githubusercontent.com/minimistjs/minimist/ecfdaea23e7931c0d529c52b743c711c3278a8ce/.eslintrc",
+      "type": "file",
+      "_links": {
+        "self": "https://api.github.com/repos/minimistjs/minimist/contents/.eslintrc?ref=ecfdaea23e7931c0d529c52b743c711c3278a8ce",
+        "git": "https://api.github.com/repos/minimistjs/minimist/git/blobs/09e4713a891c701a65179a472133817cb00e04c0",
+        "html": "https://github.com/minimistjs/minimist/blob/ecfdaea23e7931c0d529c52b743c711c3278a8ce/.eslintrc"
+      }
+    },
+    {
+      "name": ".github",
+      "path": ".github",
+      "sha": "db5a74b4e00b013ba702500222ca290ccc8715aa",
+      "size": 0,
+      "url": "https://api.github.com/repos/minimistjs/minimist/contents/.github?ref=ecfdaea23e7931c0d529c52b743c711c3278a8ce",
+      "html_url": "https://github.com/minimistjs/minimist/tree/ecfdaea23e7931c0d529c52b743c711c3278a8ce/.github",
+      "git_url": "https://api.github.com/repos/minimistjs/minimist/git/trees/db5a74b4e00b013ba702500222ca290ccc8715aa",
+      "download_url": null,
+      "type": "dir",
+      "_links": {
+        "self": "https://api.github.com/repos/minimistjs/minimist/contents/.github?ref=ecfdaea23e7931c0d529c52b743c711c3278a8ce",
+        "git": "https://api.github.com/repos/minimistjs/minimist/git/trees/db5a74b4e00b013ba702500222ca290ccc8715aa",
+        "html": "https://github.com/minimistjs/minimist/tree/ecfdaea23e7931c0d529c52b743c711c3278a8ce/.github"
+      }
+    },
+    "... 10 more items trimmed"
+  ]
+}

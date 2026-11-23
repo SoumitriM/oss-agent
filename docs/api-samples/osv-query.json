@@ -1,0 +1,49 @@
+{
+  "url": "https://api.osv.dev/v1/query",
+  "note": "real response recorded by oss_agent/http.py (no auth headers are stored); long lists and strings trimmed for reading",
+  "response": {
+    "vulns": [
+      {
+        "id": "GHSA-xvch-5gv4-984h",
+        "summary": "Prototype Pollution in minimist",
+        "details": "Minimist prior to 1.2.6 and 0.2.4 is vulnerable to Prototype Pollution via file `index.js`, function `setKey()` (lines 69-95).",
+        "aliases": [
+          "CVE-2021-44906"
+        ],
+        "modified": "2026-03-13T22:11:59.523514Z",
+        "published": "2022-03-18T00:01:09Z",
+        "database_specific": {
+          "nvd_published_at": "2022-03-17T16:15:00Z",
+          "cwe_ids": [
+            "CWE-1321"
+          ],
+          "severity": "CRITICAL",
+          "github_reviewed": true,
+          "github_reviewed_at": "2022-03-18T23:13:40Z"
+        },
+        "references": [
+          {
+            "type": "ADVISORY",
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-44906"
+          },
+          {
+            "type": "WEB",
+            "url": "https://github.com/minimistjs/minimist/issues/11"
+          },
+          "... 13 more items trimmed"
+        ],
+        "affected": [
+          "[dict trimmed]",
+          "[dict trimmed]"
+        ],
+        "schema_version": "1.9.0",
+        "severity": [
+          {
+            "type": "CVSS_V3",
+            "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+          }
+        ]
+      }
+    ]
+  }
+}

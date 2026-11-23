@@ -197,7 +197,32 @@ success → `{"ok": true, ...}`, failure → `{"ok": false, "error": "<short rea
    A failing source is reported (`nvd_unavailable: true`, `github_unavailable: true`) and never hides the others. If no version is given, the result notes "give a version for an exact check".
 3. **search_code(repo, query)** (M2). GitHub code search within the repo, max 10 hits (path + fragments). Used for telemetry, analytics and external endpoints.
 4. **read_file(repo, path, start_line=1, end_line=120)** (M2). Raw file at the HEAD commit, with line numbers, max 200 lines, and a pinned link `https://github.com/{repo}/blob/{sha}/{path}#L{a}-L{b}`.
-5. **scan_skill(repo, skill_path)** (M4). Reads SKILL.md and lists the skill folder. Deterministic regex red flags: network calls, secret paths (`~/.ssh`, `.env`, tokens), eval/exec, base64 decoding, piping to a shell. Each flag has file, line and a pinned link. The LLM judges whether the flags match the skill's stated purpose.
+5. **scan_skill(repo, skill_path)** (M4b, `skills.py`). Fetches the **whole** SKILL.md plus text files in its folder (and `scripts/`, `bin/`, `src/`, `tools/`), max 10 files, as text: **never executed**. It returns:
+   - the declared name and description;
+   - the lines and files scanned, and the files not scanned, with the reason;
+   - **signals** (max 10, the strongest first): `{id, category, file, line, excerpt, pinned url, inspect: {start_line, end_line}}`, where the window is ±30 lines;
+   - `path_context`, stating that a folder name like "malware" is context, not evidence.
+
+   Categories, in priority order: `instruction_override`, `exfiltration`, `secret_access`, `destructive`, `pipe_to_shell`, `obfuscation`, `agent_directive`.
+   Signals are **suspicious only**. The agent decides whether to inspect them with `read_file`, using the window around the line rather than the whole file.
+
+   **Evidence levels** (finding fields `evidence_level`, `category`, `why`, `uncertainty`; file and lines are derived by code from the pinned link):
+   - **suspicious**: unexpected or off-purpose instructions, sensitive references, obfuscation, risky commands;
+   - **confirmed_manipulation**: an inspected instruction that overrides higher-priority instructions, ignores the user's task, or hides things from the user;
+   - **confirmed_dangerous**: an inspected instruction or code that collects and sends secrets, or runs destructive commands.
+
+   `rules.validate_skill_findings` **downgrades** a confirmed claim to suspicious, recording the reason in `downgraded`, unless:
+   1. the quote is verified;
+   2. **the quote itself shows the behaviour**: an override phrase, secret **and** send/network, or a destructive command;
+   3. its lines lie inside a `read_file` range.
+
+   `rules.skill_rule`: a validated confirmed finding → skills **red** + headline "Do not use this skill: confirmed malicious instructions". This is not downgraded because other parts of the file were not read. Suspicious-only findings → never red and never green (→ yellow).
+
+   **Coverage:**
+   - **inspection gap:** a signal whose line no `read_file` covered → one feedback round, then it's listed in `inspection_gaps`; a green becomes yellow, but a justified red stays;
+   - **required gap:** a question about *using* a known subject with no licence lookup → feedback, then the headline "Not an approval to use: licence not checked".
+
+   Repo-level facts (licence, intended use) stay separate from the skill's behaviour, so an unlicensed benchmark repo can be overall RED while skill trust is YELLOW. Fixtures: `tests/skill_fixtures.py`, a fake repo made of offline HTTP-cache entries.
 6. **lookup_register(repo)** (M4). Reads the local `register.jsonl` and returns the most recent
    earlier record for the repo (date, commit, verdict, areas, conditions, decision), or
    `{"ok": true, "found": false}`. If `register.jsonl` is missing or corrupt, it is treated as
@@ -305,7 +330,20 @@ Every tool description follows `NEEDS: … RETURNS: … GOOD FOR: …`, with pre
 `coverage.find_gaps(report, tool_outputs, parsed)` finds:
 - **no_evidence:** an area has a status, but no tool that could support it returned a result. Licence needs `get_repo_info`/`read_file`, maintenance `get_repo_info`, security `check_vulnerabilities`, privacy `search_code`/`read_file`. A re-check with a found register record is exempt.
 - **versions:** security has a status, but an asked version of the exact package was not covered by a successful `check_vulnerabilities`.
+- **required:** the question has *security intent* (see `query.py` intent), the subject exists (a parsed package, or a successful `get_repo_info`), but no `check_vulnerabilities` was tried.
+  If this is still the case after feedback, code sets the headline **"Security not checked: not an approval to use"**, never "OK to use". This came from the axios eval failure.
 - **unverified:** a finding's quote is not in any tool output.
+
+**Direct answers (0 tools):**
+- Code appends *"— Answered from general knowledge: no sources were checked."*
+- If the question has *evidence intent* (risk, maintenance, licence, security or privacy words), the agent first gets **one** reminder that component facts need evidence. That's a quality goal, not a tool order.
+- "MIT vs GPL: which is safer?" has no such intent and stays a 0-tool answer.
+
+**Query intent** (`query.py`, regexes):
+- `security` = words such as add, install, safe, risk, act, CVE, malware, or any version named;
+- `needs_evidence` = security, or maintenance, licence, telemetry or privacy words.
+
+It is used only for coverage checks, never to order tools.
 
 On the **first** `submit_report` with gaps, the tools node does not accept the report. It returns a ToolMessage `{"ok": false, "coverage_gaps": [...], "action": "gather or mark not_checked … submit again"}` and sets `coverage_rounds = 1`.
 
@@ -314,6 +352,48 @@ On the **second** submit the report is accepted, and the `checks` node runs `cov
 All other guardrails stay: query normalising, no substitution, quote verification, a deterministic verdict and headline.
 
 ## 10. Output (report.py, main.py)
+
+### 10.0 Question-aware answer (current; supersedes the area-by-area layout below)
+The validated, structured report is the source of truth. `report.present()` only selects, orders and words it, and `render()` (terminal) and the web UI show the same sections.
+`submit_report` carries `intent` (`adoption` | `skill_security` | `privacy` | `general`), set by the LLM from the question. Code picks the areas the question is about:
+- adoption → security, licence;
+- skill_security → skills;
+- privacy → privacy;
+- general → all areas.
+
+1. **Target:** repo @ commit · exact package@versions / skill path · monorepo folder.
+2. **Decision**, from the deterministic verdict only:
+   - GREEN → "Recommended";
+   - YELLOW → "Usable with conditions";
+   - RED → "Do not adopt";
+   - incomplete → "Insufficient evidence to approve".
+
+   Incomplete means: overall not checked, a required area unchecked, security unverified, or every area the question is about unchecked. The code headline (e.g. "Do not use: malicious release") follows the decision.
+3. **Summary:** the LLM's 1–3 sentence answer to the actual question (code-written for malware cases).
+4. **Why:** the areas the question is about, **plus every RED area whatever the intent**. Each area shows its summary and up to 2–3 verified findings, in plain language, with quote, permalink and ✔/⚠. Skill findings show `[level · category] file:line`. Security shows per-version lines.
+5. **Coverage notes, written by code from tool outputs:**
+   - "No matching advisories were returned by osv, github for pkg@v";
+   - "Not checked: <source> (<reason>)";
+   - "Searched the code for … and read N file(s); data flows were not comprehensively assessed beyond these files";
+   - "Scanned …; X of Y flagged lines inspected".
+6. **What to do next:** up to 3 concrete actions (LLM `conditions`).
+7. **Limitations:** only gaps that could change the decision:
+   - unchecked areas the question is about;
+   - coverage and inspection gaps;
+   - unverified claims;
+   - the pattern-scanner note (a regex hit is context, not a verdict);
+   - up to 2 questions only the user can answer.
+8. **One line:** "Also checked: licence 🟢 … · Not checked: privacy, skills".
+
+`check_consistency()` runs on every render and **raises** if:
+- the decision line differs from the verdict;
+- a RED area is missing from "Why";
+- an unchecked area appears under "Also checked";
+- "Recommended" is shown with a yellow or red area.
+
+Tests: `tests/test_presentation.py` (axios@1.14.1, MalSkillBench Azure skill, agent-threat-rules, grafana privacy, n8n general).
+
+### 10.1 Original area-by-area layout (v2, kept for reference)
 Terminal output of about 25 lines at most:
 ```
 n8n-io/n8n @ d7177ef · checked 2026-11-21
@@ -344,9 +424,9 @@ Recommendation: ...
 | M3 | `check_vulnerabilities` (NVD, GitHub advisories incl. malware, endoflife) and the GDPR/CRA mapping | "Our portal runs PHP 8.1 (php/php-src). Do we need to act?"; "Can we add axios/axios to our new web app?" |
 | M4 ✔ | Human in the loop: `ask` (`ask_user`, max 2), `approve`, `register`, `lookup_register` (in `register.py`). | The agent asks before guessing a repo name. **Run 2, "Re-check n8n-io/n8n", shows only what changed since run 1.** |
 | M4c ✔ | Simple local chat UI: `server.py` (stdlib only, 127.0.0.1 only) with `POST /api/start {question}` and `POST /api/resume {thread_id, answer}`; `web/index.html` renders report cards, ✔/⚠ evidence, the re-check view, ask turns, approve/reject buttons with a comment, and a collapsible trace. All tool text is rendered with `textContent`; only `https://` links are clickable. | Same demos in the browser |
-| M4b | (moved to the end by the priority rule) `scan_skill` + a local fixture "malicious" skill (harmless fake payload: curl to example.com, a reference to `~/.ssh`, a hidden instruction in SKILL.md). | The agent flags the skill and doesn't obey it. |
+| M4b ✔ | `scan_skill`, evidence levels, inspection coverage, and 4 fixture skills (exfiltration, off-purpose block, benign security docs, 1,449-line file) plus the recorded `lxyeternal/MalSkillBench` az skill. | Targeted inspection of the suspicious lines; RED only with confirmed, inspected evidence. |
 | M5 | Robustness: all edge cases, MAX_STEPS, partial reports, `--offline` replay, fixtures for all demos | |
-| M6 | Evaluation: `tests/test_cases.json` (10 cases, each with scripted `interrupt_answers`) and `tests/eval.py` (`--record` once online, then offline, 3 runs). Per run it checks: required/forbidden tools, steps, **questions asked ≤ 2** (or a per-case `max_questions`), quotes verified, verdict, plus optional area statuses, headline, required finding, legal article, `repo` and `package_location`. Also: **a plan was written** whenever tools were used; **tool calls stay low for simple questions** (`max_tool_calls`, Flask licence ≤ 2); and **plans differ between question types** (word-overlap similarity of the first plans ≤ 0.7). Prints a pass rate and average tokens and seconds. | |
+| M6 | Evaluation: `tests/test_cases.json` (10 cases, each with scripted `interrupt_answers`) and `tests/eval.py` (`--record` once online, then offline, 3 runs). Per run it checks: required/forbidden tools, steps, **questions asked ≤ 2** (or a per-case `max_questions`), quotes verified, verdict, plus optional area statuses, headline, required finding, legal article, `repo` and `package_location`. **Fixture misses:** when a tool failed only because the offline cache had no recording for its exact request, the run is labelled `MISS` and not scored as pass or fail. Cases where the model picks free-form search words use `"http": "online"`. Also `min_tool_calls` (component-risk questions need evidence; case `langchain-vs-langgraph-risks`). Also: **a plan was written** whenever tools were used; **tool calls stay low for simple questions** (`max_tool_calls`, Flask licence ≤ 2); and **plans differ between question types** (word-overlap similarity of the first plans ≤ 0.7). Prints a pass rate and average tokens and seconds. | |
 | M7 | README: setup, architecture diagram, design decisions, limits and future work, 3-sentence summary | |
 | M8 | (only on request) OpenRouter backend | |
 
@@ -362,10 +442,21 @@ Before the submission, the code default for `LLM_PROVIDER` switches to `anthropi
 - Never clone, install or execute anything from the assessed repo.
 - No secrets in prompts, logs or fixtures.
 
+### 12.1 Security layer (`guard.py` + `guard` node, no LLM)
+| Threat | Control |
+|---|---|
+| Prompt injection in the **question** | `guard` node (first node): injection patterns (e.g. "ignore previous instructions", "you are now", "reveal your prompt", fake `</untrusted_data>`/`<system>` tags) → fixed refusal, **no LLM call**. Questions over 2,000 characters → refused. |
+| Prompt injection in **tool output** (README, SKILL.md, code) | Wrapped in `<untrusted_data>`. `guard.neutralise` stops content from closing or faking the wrapper or system tags. `guard.scan_untrusted` flags instruction-like text: the result gets `injection_warning`, and code adds a finding ("treated as data, not followed"). |
+| Write or execute actions | `READ_ONLY_TOOLS`: the graph asserts at start-up that every data tool is declared read-only, and the tools node rejects anything else. HTTP is GET-only except the exact endpoint `https://api.osv.dev/v1/query`. Tool string arguments are capped at 500 characters. The register is written only by the `register` node after human approval. `ChatClaudeCLI` runs with all built-in tools disabled. The web UI listens on 127.0.0.1 only. |
+| Off-topic questions | The prompt says to reply exactly `OUT_OF_SCOPE`; code replaces that with a fixed refusal. A question with **no scope signal** (no package or repo, no OSS words) that the model answers without tools is refused by code, whatever the model wrote. |
+| Answers without evidence | Labelled "Answered from general knowledge" by code. |
+
+Eval cases: `out-of-scope-poem`, `out-of-scope-with-scope-words`, `prompt-injection-in-question` (0 tokens).
+
 ## 13. Edge cases (each gives a clear message, never a crash)
 1. Repo doesn't exist or has a typo → "repo not found". The agent asks (M4) or states its assumption.
 2. Archived repo → red maintenance.
-3. No licence file → red licence.
+3. No licence file → red licence, only on proof: GitHub detected none, the root has no licence-like file, and no LICENSE file covers the used folder (monorepo package or skill) or its parents. A failed lookup, an undetected LICENSE.md, or several licence files (dual licensing) → the LLM reads them.
 4. Custom or source-available licence (e.g. n8n) → read the file and explain the limits.
 5. GitHub rate limit or 403 → clear error; the area is marked `not_checked`.
 6. NVD down → fall back to GitHub advisories and note it.
@@ -390,6 +481,10 @@ Before the submission, the code default for `LLM_PROVIDER` switches to `anthropi
     *Regression case:* `wdio-browserstack-cve`.
 25. Package repo can't be resolved → licence and maintenance `not_checked` with the reason; security is still reported.
 26. A report claims a status without evidence, has an unverified quote, or misses an asked version → one coverage feedback round; then code marks those areas `not_checked`.
+27. Large SKILL.md with suspicious lines near the end → `scan_skill` signals with line numbers and inspect windows; the agent reads windows, not the whole file; coverage reports what was and wasn't inspected.
+28. Off-topic but not harmful instructions in a skill → suspicious (yellow), never confirmed by a regex hit or a folder name.
+29. Confirmed exfiltration or instruction override with inspected, quote-supported evidence → skills red, overall red.
+30. Using a skill or package from an unlicensed repo → licence red → overall red, even when skill trust is only yellow.
     *Regression case:* `tests/test_cases.json` → `wppconnect-malware-range`.
 
 ## 14. Fallbacks

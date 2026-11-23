@@ -1,0 +1,5 @@
+{
+  "url": "https://raw.githubusercontent.com/minimistjs/.github/1655d59d7569ee97172166f63d31f5142ab84f0a/SECURITY.md",
+  "note": "real response recorded by oss_agent/http.py (no auth headers are stored); long lists and strings trimmed for reading",
+  "response": "# Security\n\nPlease email [@ljharb](https://github.com/ljharb) or see https://tidelift.com/security if you have a potential security vulnerability to report.\n"
+}
