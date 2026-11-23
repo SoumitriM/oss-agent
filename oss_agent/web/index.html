@@ -32,7 +32,7 @@
   .head { font-weight: 600; }
   .overall { display: inline-block; margin: 4px 0 8px; padding: 2px 10px; border-radius: 99px; font-weight: 600; font-size: 14px;
              border: 1px solid currentColor; }
-  .s-green { color: var(--green); } .s-yellow { color: var(--yellow); } .s-red { color: var(--red); } .s-not_checked { color: var(--grey); }
+  .s-green { color: var(--green); } .s-yellow { color: var(--yellow); } .s-red { color: var(--red); } .s-not_checked { color: var(--grey); } .s-answer { color: var(--accent); }
   .area { border-top: 1px solid var(--line); padding: 8px 0; }
   .area .name { font-weight: 600; font-size: 13px; letter-spacing: .04em; }
   .area .tag { font-size: 12px; color: var(--muted); margin-left: 6px; }
@@ -51,6 +51,10 @@
            color: var(--accent-text); font: inherit; cursor: pointer; }
   button.secondary { background: transparent; color: var(--accent); }
   button:disabled { opacity: .5; cursor: default; }
+  .followup { display: block; text-align: left; margin: 4px 0; font-size: 14px; padding: 6px 12px; }
+  ol.steps { margin: 4px 0 6px 20px; padding: 0; } ol.steps li { margin-bottom: 6px; }
+  .evidence-btn { margin-top: 8px; font-size: 13px; padding: 5px 12px; }
+  .evidence { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 6px; }
   .chips { display: flex; gap: 6px; flex-wrap: wrap; }
   .chips button { font-size: 13px; padding: 5px 10px; background: transparent; color: var(--accent); }
 </style>
@@ -125,53 +129,80 @@ function list(parent, title, items) {
 }
 
 // ---------- report card ----------
-function renderReport(r) {
+function renderReport(p, s) {  // p = report.present(): the important part first, evidence on request
   const m = bubble("");
-  const commit = r.commit ? "@ " + r.commit.slice(0, 7) : "(no commit checked)";
-  m.appendChild(el("div", "head", `${r.repo} ${commit} · checked ${r.checked_on}`));
-  m.appendChild(el("div", "overall s-" + r.overall, `${ICON[r.overall]} ${r.headline || VERDICT[r.overall]}`));
-  if (r.package_location) {  // monorepo: the package is one folder of a bigger repo
-    const p = el("p", "small", "Package lives in " + r.package_location + " → ");
-    p.appendChild(link(r.package_url));
-    m.appendChild(p);
-  }
-  if (r.assumptions && r.assumptions.length) m.appendChild(el("p", "small", "Assumed: " + r.assumptions.join(" · ")));
-
-  let shown = AREAS;
-  if (r.previous) {  // re-check: only what changed, the rest on one line
-    const same = r.previous.commit === r.commit ? "same commit" : "was @ " + (r.previous.commit || "?").slice(0, 7);
-    m.appendChild(el("p", "small", `Re-check of ${r.previous.checked_on} (${same}, previous overall ${ICON[r.previous.overall] || "?"})`));
-    shown = r.changed_areas || [];
-    m.appendChild(el("p", "", shown.length ? "Changed: " + shown.map(a => a.toUpperCase()).join(", ") : "Changed: nothing"));
-    const same_areas = AREAS.filter(a => !shown.includes(a)).map(a => `${a.toUpperCase()} ${ICON[r.areas[a].status]}`);
-    if (same_areas.length) m.appendChild(el("p", "small", "Unchanged since last check: " + same_areas.join(" · ")));
-  }
-  for (const name of shown) {
-    const area = r.areas[name], box = el("div", "area");
-    const title = el("div");
-    title.appendChild(el("span", "name s-" + area.status, `${ICON[area.status]} ${name.toUpperCase()}`));
-    const articles = (r.legal || []).filter(x => x.area === name).map(x => x.article);
-    if (articles.length) title.appendChild(el("span", "tag", "(" + articles.join(", ") + ")"));
-    if (area.carried_over) title.appendChild(el("span", "tag", "[from " + area.carried_over + "]"));
-    box.appendChild(title);
-    box.appendChild(el("div", "", area.summary));
-    const f = (r.findings || []).filter(x => x.area === name).sort((a, b) => (b.verified === true) - (a.verified === true))[0];
-    if (f) {
-      box.appendChild(el("div", "quote", "“" + f.evidence_quote.replace(/\s+/g, " ") + "”"));
-      const src = el("div", "src");
-      src.appendChild(document.createTextNode("→ "));
-      src.appendChild(link(f.url));
-      src.appendChild(f.verified ? el("span", "ok", " ✔") : el("span", "bad", " ⚠ unverified"));
-      box.appendChild(src);
+  const d = p.decision;
+  const status = d.text === "Do not adopt" ? "red" : d.text === "Recommended" ? "green"
+               : d.text === "Usable with conditions" ? "yellow" : d.text === "Answer" ? "answer" : "not_checked";
+  m.appendChild(el("div", "overall s-" + status, `${d.icon} ${d.text}`));
+  if (d.reason) m.appendChild(el("p", "small", d.reason));
+  if (p.confidence) m.appendChild(el("p", "small", `Confidence: ${p.confidence.level} — ${p.confidence.reason}`));
+  m.appendChild(el("p", "", p.summary));
+  if (p.next && p.next.length) {  // every step traceable: its source, or labelled as advice
+    m.appendChild(el("div", "head", "What to do next"));
+    const ol = el("ol", "steps");
+    for (const s of p.next) {
+      const li = el("li", "", s.text);
+      const src = el("div", "src");  // every shown step rests on a verified finding
+      src.appendChild(document.createTextNode("Source: “" + s.source.quote + "” "));
+      if (s.source.url) src.appendChild(link(s.source.url));
+      li.appendChild(src);
+      ol.appendChild(li);
     }
-    if (name === "security") (r.per_version || []).forEach(row =>  // per-version verdicts, decided by code
-      box.appendChild(el("div", "small s-" + row.status, `${ICON[row.status]} ${row.version}: ${row.detail}`)));
-    m.appendChild(box);
+    m.appendChild(ol);
   }
-  list(m, "Conditions", r.conditions);
-  list(m, "Open questions", r.open_questions);
-  m.appendChild(el("div", "head", "Recommendation"));
-  m.appendChild(el("p", "", r.recommendation));
+  list(m, "Limitations", p.limitations);  // only what the answer needed and did not get
+  if (p.follow_up && p.follow_up.length) {  // a follow-up, not a limitation: answer it and ask again
+    m.appendChild(el("div", "head", "Follow-up"));
+    for (const q of p.follow_up) {
+      const b = el("button", "secondary followup", q);
+      b.type = "button";
+      b.onclick = () => {  // no memory between questions: resend the original question with the answer added
+        input.value = `${(s && s.question) || ""} (${q} My answer: `;
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      };
+      m.appendChild(b);
+    }
+  }
+
+  const toggle = el("button", "secondary evidence-btn", "Show evidence");
+  toggle.type = "button";
+  const box = el("div", "evidence");
+  box.hidden = true;
+  toggle.onclick = () => { box.hidden = !box.hidden; toggle.textContent = box.hidden ? "Show evidence" : "Hide evidence"; };
+  m.append(toggle, box);
+
+  box.appendChild(el("p", "small", `${p.target} · checked ${p.checked_on}`));
+  for (const item of p.why) {
+    const area = el("div", "area");
+    area.appendChild(el("div", "name s-" + item.status, `${ICON[item.status]} ${item.area.toUpperCase()}`));
+    area.appendChild(el("div", "", item.summary));
+    for (const e of item.evidence) {
+      const tag = e.level ? `[${e.level.replace(/_/g, " ")}${e.category ? " · " + e.category : ""}] ` : "";
+      area.appendChild(el("div", "", "• " + tag + e.claim));
+      area.appendChild(el("div", "quote", "“" + e.quote + "”"));
+      const src = el("div", "src");
+      if (e.url) { src.appendChild(document.createTextNode("→ ")); src.appendChild(link(e.url)); }
+      src.appendChild(e.verified ? el("span", "ok", " ✔ verified") : el("span", "bad", " ⚠ unverified"));
+      area.appendChild(src);
+      if (e.downgraded) area.appendChild(el("div", "small", "Downgraded by code: " + e.downgraded));
+    }
+    box.appendChild(area);
+  }
+  list(box, "Not verified", p.not_verified);
+  if (p.tools) {  // every tool: ticked when this answer used it, with what it checked and a link
+    box.appendChild(el("div", "head", "Tools"));
+    for (const t of p.tools) {
+      if (!t.used) box.appendChild(el("div", "small", "☐ " + t.name));
+      for (const c of t.calls) {
+        const row = el("div", "small", `☑ ${t.name}: ${c.text} `);
+        if (c.url) row.appendChild(link(c.url));
+        box.appendChild(row);
+      }
+    }
+  }
+  if (s) renderTrace(box, s);
   return m;
 }
 
@@ -229,31 +260,10 @@ function handle(s) {
     input.focus();
     return;
   }
-  if (s.status === "interrupt" && s.interrupt.type === "approve") {
-    const card = renderReport(s.interrupt.report);
-    approvalButtons(card, s.thread_id);
-    return;
-  }
   threadId = null;
   input.placeholder = "Ask about another component…";
-  const m = s.report  // a report was already shown with the approval buttons; now confirm the decision
-    ? plain(s.decision && s.decision.approved ? "✔ Saved to the register." : "Not saved.", "small")
-    : plain(s.answer || "(no answer)");
-  renderTrace(m, s);
-}
-
-function approvalButtons(card, id) {
-  const row = el("div", "actions");
-  const comment = el("input");
-  comment.type = "text"; comment.placeholder = "Optional comment (e.g. internal use only)";
-  const yes = el("button", "", "Approve & save");
-  const no = el("button", "secondary", "Don't save");
-  const decide = (answer) => { row.remove(); step("/api/resume", { thread_id: id, answer }); };
-  yes.onclick = () => decide(("yes " + comment.value).trim());
-  no.onclick = () => decide("no");
-  row.append(comment, yes, no);
-  card.appendChild(row);
-  card.scrollIntoView({ behavior: "smooth", block: "end" });
+  if (s.presentation) renderReport(s.presentation, s);
+  else renderTrace(plain(s.answer || "(no answer)"), s);
 }
 
 function setBusy(b) {

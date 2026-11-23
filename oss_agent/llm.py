@@ -21,6 +21,9 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 DEFAULT_MODEL = "claude-sonnet-5-5"
 MAX_TOKENS = 8000
 CLI_TIMEOUT_S = 180
+# Prompt caching (API backend): the tool list + system prompt are identical on every call, so one breakpoint
+# after the system prompt caches both (tools render before it). The conversation is not cached. 5-minute TTL.
+CACHE = {"type": "ephemeral"}
 
 
 class LLMError(Exception):
@@ -43,7 +46,7 @@ def get_model(tools: list):
             # On a safety-classifier decline, the API reruns the request on a fallback model.
             betas=["server-side-fallback-2026-07-01"], model_kwargs={"fallbacks": "default"},
         )
-        return chat.bind_tools(tools, parallel_tool_calls=False)
+        return chat.bind_tools(tools)  # independent tools may run in the same step
     raise LLMError(f"unknown LLM_PROVIDER '{provider}' (use claude_cli or anthropic)")
 
 
@@ -60,14 +63,26 @@ def invoke(model, messages: list) -> AIMessage:
         raise LLMError(f"Anthropic API error: {type(e).__name__}")
 
 
+def system_message(text: str) -> SystemMessage:
+    """The system prompt as one cached block (tools render before it, so they are cached too)."""
+    return SystemMessage(content=[{"type": "text", "text": text, "cache_control": CACHE}])
+
+
+def _text(content) -> str:
+    """Message content as plain text, whether a string or a list of text blocks."""
+    return content if isinstance(content, str) else "".join(b.get("text", "") for b in content if isinstance(b, dict))
+
+
 # ---------- claude_cli backend ----------
+
+MAX_ACTIONS = 3  # tools the agent may request in one step (only ones that do not need each other's results)
 
 REPLY_SCHEMA = {
     "type": "object",
     "properties": {
         "text": {"type": "string"},
         "tool_calls": {
-            "type": "array", "maxItems": 1,  # one action per step
+            "type": "array", "maxItems": MAX_ACTIONS,  # independent actions may share a step
             "items": {"type": "object", "properties": {"name": {"type": "string"}, "input": {"type": "object"}},
                       "required": ["name", "input"]},
         },
@@ -90,7 +105,7 @@ class ChatClaudeCLI(BaseChatModel):
 
     def _generate(self, messages, stop=None, run_manager=None, tools=None, **kwargs) -> ChatResult:
         tools = tools or []
-        system = "\n".join(m.content for m in messages if isinstance(m, SystemMessage))
+        system = "\n".join(_text(m.content) for m in messages if isinstance(m, SystemMessage))
         out = _run_cli(_cli_system_prompt(system, tools), _render_transcript(messages), _reply_schema(tools), self.model)
         reply = out["structured_output"]
         calls = [{"name": c["name"], "args": c["input"], "id": f"call_{int(time.time() * 1000)}_{i}", "type": "tool_call"}
@@ -99,7 +114,9 @@ class ChatClaudeCLI(BaseChatModel):
         in_tok = u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0) + u.get("cache_read_input_tokens", 0)
         msg = AIMessage(content=reply["text"], tool_calls=calls, usage_metadata={
             "input_tokens": in_tok, "output_tokens": u.get("output_tokens", 0),
-            "total_tokens": in_tok + u.get("output_tokens", 0)})
+            "total_tokens": in_tok + u.get("output_tokens", 0),
+            "input_token_details": {"cache_read": u.get("cache_read_input_tokens", 0),
+                                    "cache_creation": u.get("cache_creation_input_tokens", 0)}})
         return ChatResult(generations=[ChatGeneration(message=msg)])
 
 
@@ -129,7 +146,8 @@ def _cli_system_prompt(system: str, tools: list) -> str:
         "`tool_calls` field as {name, input}. The program runs it and shows the result as "
         "[TOOL RESULT] in the next turn. A requested action is never 'unavailable' unless a "
         f"[TOOL RESULT] says so.\n\nAvailable actions:\n{specs}\n\n"
-        "# How to reply\nRequest exactly ONE action per reply. Put any short explanation in "
+        f"# How to reply\nRequest up to {MAX_ACTIONS} actions per reply when they do not depend on each other's "
+        "results; otherwise request one and wait for its result. Put any short explanation in "
         "`text`. Leave `tool_calls` empty only for a direct answer that needs no repo data."
     )
 
@@ -140,7 +158,7 @@ def _reply_schema(tools: list) -> dict:
     names = [t["name"] for t in tools]
     item = schema["properties"]["tool_calls"]["items"]
     item["properties"]["name"] = {"type": "string", "enum": names} if names else {"type": "string"}
-    schema["properties"]["tool_calls"]["description"] = "At most one action for the program to run: " + ", ".join(names)
+    schema["properties"]["tool_calls"]["description"] = f"Up to {MAX_ACTIONS} independent actions for the program to run: " + ", ".join(names)
     return schema
 
 

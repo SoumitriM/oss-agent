@@ -17,6 +17,8 @@ def print_trace(trace: list) -> None:
         what = f"{t['tool']} {json.dumps(t['args'])[:50]}" if t.get("tool") else t["detail"]
         result = t["detail"] if t.get("tool") else ""
         tokens = f"{t['tokens']:>6} tok" if "tokens" in t else " " * 10
+        if t.get("cache_read"):  # input tokens served from the prompt cache
+            tokens += f" ({t['cache_read']} cached)"
         seconds = f"{t['seconds']:>5}s" if "seconds" in t else " " * 6
         print(f"  {t['step']:>2} {t['node']:<12} {what:<62} {tokens} {seconds}  {result[:70]}")
         if t.get("plan"):  # the model's own plan / plan update, written before its tool call

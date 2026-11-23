@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))  # run as a plain script f
 
 from dotenv import load_dotenv  # noqa: E402
 
-from oss_agent import graph, http, llm, register  # noqa: E402
+from oss_agent import graph, guard, http, llm, register  # noqa: E402
 
 CASES = Path(__file__).parent / "test_cases.json"
 
@@ -67,12 +67,21 @@ def check(case: dict, state: dict) -> dict:
     }
     if "max_tool_calls" in exp:  # simple questions must stay cheap
         checks["calls"] = (len(data_calls) <= exp["max_tool_calls"], f"{len(data_calls)}/{exp['max_tool_calls']}")
+    if "refusal" in exp:  # out of scope or role-change: the agent's marker becomes code's fixed text
+        checks["refusal"] = (state["answer"] in (guard.REFUSAL, guard.TOO_LONG, guard.GENERAL_REPLY), (state["answer"] or "-")[:40])
+    if "min_tool_calls" in exp:  # questions about component facts must use evidence
+        checks["min_calls"] = (len(data_calls) >= exp["min_tool_calls"], f"{len(data_calls)}>={exp['min_tool_calls']}")
     for key in ("repo", "package_location"):
         if key in exp:
             checks[key] = ((report or {}).get(key) == exp[key], (report or {}).get(key) or "-")
     for area, status in exp.get("areas", {}).items():
         got = report["areas"][area]["status"] if report else "none"
-        checks[f"area:{area}"] = (got == status, got)
+        checks[f"area:{area}"] = (got in (status if isinstance(status, list) else [status]), got)
+    if "min_inspected" in exp:  # targeted follow-up: flagged lines were actually looked at (quality, not sequence)
+        n = len([c for c in data_calls if c == "read_file"])
+        checks["inspected"] = (n >= exp["min_inspected"], f"{n}>={exp['min_inspected']}")
+    if "not_headline" in exp:
+        checks["not_headline"] = ((report or {}).get("headline") != exp["not_headline"], (report or {}).get("headline") or "-")
     if "headline" in exp:
         checks["headline"] = ((report or {}).get("headline") == exp["headline"], (report or {}).get("headline") or "-")
     if "required_finding" in exp:
@@ -84,14 +93,28 @@ def check(case: dict, state: dict) -> dict:
     return checks
 
 
-def run_case(app, case: dict, run_no: int) -> dict:
+def fixture_misses(state: dict) -> list:
+    """Tool calls that failed only because the offline cache had no recording for them (eval setup, not agent)."""
+    misses = []
+    for o in state["tool_outputs"]:
+        text = json.dumps(o["result"])
+        if "offline mode: no cached response" in text:
+            misses.append(f"{o['tool']}({json.dumps(o['args'])[:50]})")
+    return misses
+
+
+def run_case(app, case: dict, run_no: int, offline: bool) -> dict:
     started = time.time()
+    http.OFFLINE = offline and case.get("http") != "online"  # free-form search queries can't be pre-recorded
     try:
         state = graph.run(app, case["question"], answer_fn(case["interrupt_answers"]), thread_id=f"{case['id']}-{run_no}")
     except llm.LLMError as e:
         return {"ok": False, "checks": {"llm": (False, str(e)[:60])}, "tokens": 0, "seconds": round(time.time() - started, 1)}
     checks = check(case, state)
-    return {"ok": all(passed for passed, _ in checks.values()), "checks": checks, "plan": first_plan(state),
+    misses = fixture_misses(state)
+    if misses:  # not counted as pass or fail: re-record (--record) or mark the case "http": "online"
+        checks = {"fixture": (False, "no recording for " + ", ".join(misses))}
+    return {"ok": all(passed for passed, _ in checks.values()), "miss": bool(misses), "checks": checks, "plan": first_plan(state),
             "tokens": sum(t.get("tokens", 0) for t in state["trace"]), "seconds": round(time.time() - started, 1)}
 
 
@@ -102,7 +125,6 @@ def main() -> None:
     p.add_argument("--case", help="run only this case id")
     p.add_argument("--record", action="store_true", help="online, 1 run: (re)fill the HTTP fixtures")
     args = p.parse_args()
-    http.OFFLINE = not args.record
     runs = 1 if args.record else args.runs
     cases = [c for c in json.loads(CASES.read_text()) if not args.case or c["id"] == args.case]
     register.REGISTER_PATH = Path(tempfile.mkdtemp()) / "register.jsonl"  # never the real register
@@ -117,28 +139,32 @@ def main() -> None:
             continue
         register.REGISTER_PATH.unlink(missing_ok=True)
         for n in range(1, runs + 1):
-            r = run_case(app, case, n)
+            r = run_case(app, case, n, offline=not args.record)
             results.append((case["id"], r))
             failed = [f"{k}={d}" for k, (ok, d) in r["checks"].items() if not ok]
             detail = "; ".join(failed) if failed else f"verdict={r['checks'].get('verdict', (0, '?'))[1]}, tools={r['checks'].get('tools', (0, '?'))[1]}"
-            print(f"{case['id']:<28} {n:>3}  {'PASS' if r['ok'] else 'FAIL':<6} {r['tokens']:>7} {r['seconds']:>6}  {detail}", flush=True)
+            label = "MISS" if r.get("miss") else "PASS" if r["ok"] else "FAIL"
+            print(f"{case['id']:<28} {n:>3}  {label:<6} {r['tokens']:>7} {r['seconds']:>6}  {detail}", flush=True)
 
-    if results:
-        passed = sum(r["ok"] for _, r in results)
-        print(f"\nPass rate: {passed}/{len(results)} runs ({100 * passed // len(results)}%) · "
-              f"avg {sum(r['tokens'] for _, r in results) // len(results)} tokens · "
-              f"avg {sum(r['seconds'] for _, r in results) / len(results):.1f} s per run"
+    scored = [(cid, r) for cid, r in results if not r.get("miss")]  # fixture misses are not agent results
+    if scored:
+        passed = sum(r["ok"] for _, r in scored)
+        misses = len(results) - len(scored)
+        print(f"\nPass rate: {passed}/{len(scored)} runs ({100 * passed // len(scored)}%) · "
+              f"avg {sum(r['tokens'] for _, r in scored) // len(scored)} tokens · "
+              f"avg {sum(r['seconds'] for _, r in scored) / len(scored):.1f} s per run"
+              + (f" · fixture misses (not scored): {misses}" if misses else "")
               + (f" · pending: {', '.join(pending)}" if pending else ""))
         by_case = {}
-        for cid, r in results:
+        for cid, r in scored:
             by_case.setdefault(cid, []).append(r["ok"])
         print("Per case: " + " · ".join(f"{cid} {sum(v)}/{len(v)}" for cid, v in by_case.items()))
-        plans = {cid: r["plan"] for cid, r in reversed(results) if r.get("plan")}  # first run's plan per case
+        plans = {cid: r["plan"] for cid, r in reversed(scored) if r.get("plan")}  # first run's plan per case
         diverse, detail = plan_diversity(plans)
         print(f"Plan diversity: {'PASS' if diverse else 'FAIL'} · {detail}")
     else:
         diverse = False
-    sys.exit(0 if results and diverse and all(r["ok"] for _, r in results) else 1)
+    sys.exit(0 if scored and diverse and all(r["ok"] for _, r in scored) else 1)
 
 
 if __name__ == "__main__":

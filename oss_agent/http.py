@@ -19,9 +19,13 @@ ALLOWED_HOSTS = {
     "services.nvd.nist.gov",
     "endoflife.date",
     "api.osv.dev",
-    "registry.npmjs.org",  # package -> source repo lookup (GET only)
+    "registry.npmjs.org",  # package registries: package -> source repo, versions, existence (GET only)
+    "repo.packagist.org",
+    "pypi.org",
+    "crates.io",
+    "rubygems.org",
 }
-POST_HOSTS = {"api.osv.dev"}  # OSV's query API is POST-only; every other host is GET-only
+POST_ENDPOINTS = {"https://api.osv.dev/v1/query"}  # read-only query API that needs POST; everything else is GET-only
 TIMEOUT_S = 15
 MAX_BYTES = 2 * 1024 * 1024
 CACHE_TTL_S = 24 * 3600  # online: reuse answers from the last day
@@ -78,9 +82,9 @@ def get(url: str, params: dict | None = None, headers: dict | None = None, as_js
 
 
 def post_json(url: str, body: dict) -> dict:
-    """JSON POST, only to POST_HOSTS (read-only query APIs). Same result shape as get()."""
-    if urlparse(url).hostname not in POST_HOSTS:
-        return {"ok": False, "error": f"POST not allowed to: {urlparse(url).hostname}"}
+    """JSON POST, only to exact read-only query endpoints (POST_ENDPOINTS). Same result shape as get()."""
+    if url not in POST_ENDPOINTS:
+        return {"ok": False, "error": f"POST not allowed to: {url}"}
     return _request(url, None, True, body)
 
 
@@ -91,10 +95,18 @@ def _request(url: str, headers: dict | None, as_json: bool, body: dict | None) -
 
     # A POST body is part of the cache key: two OSV queries for different versions differ only there.
     path = _cache_path(url if body is None else url + "#" + json.dumps(body, sort_keys=True))
+    cached = None
     if path.exists():
-        cached = json.loads(path.read_text())
+        try:  # an unreadable or foreign cache entry is a cache miss, never a crash
+            cached = json.loads(path.read_text())
+            cached = cached if ("data" in cached or "error" in cached) and "fetched_at" in cached else None
+        except (ValueError, OSError):
+            cached = None
+    if cached:
         ttl = FRESH_TTL_S if "/commits/" in url else CACHE_TTL_S
         if OFFLINE or time.time() - cached["fetched_at"] < ttl:
+            if "error" in cached:  # a recorded "not found" replays as "not found", not as "unavailable"
+                return {"ok": False, "error": cached["error"], "cached": True}
             return {"ok": True, "data": cached["data"], "cached": True}
     if OFFLINE:
         return {"ok": False, "error": "offline mode: no cached response for this request"}
@@ -112,6 +124,9 @@ def _request(url: str, headers: dict | None, as_json: bool, body: dict | None) -
         if resp.status_code >= 500 and attempt == 1:
             time.sleep(1)
             continue
+        if resp.status_code == 404:  # a real answer ("not listed"), so it is cached like one
+            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"url": url, "fetched_at": time.time(), "error": _error_for(404)}))
         if resp.status_code != 200:
             return {"ok": False, "error": _error_for(resp.status_code)}
         try:

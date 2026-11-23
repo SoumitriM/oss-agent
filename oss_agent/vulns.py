@@ -12,7 +12,7 @@ from datetime import date
 
 from packaging.version import InvalidVersion, Version
 
-from oss_agent import http
+from oss_agent import http, registries
 
 NVD = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 GH_ADVISORIES = "https://api.github.com/advisories"
@@ -48,9 +48,9 @@ def _valid_name(package: str, ecosystem: str | None) -> bool:
 
 # ---------- OSV ----------
 
-def _osv(package: str, osv_ecosystem: str, versions: list) -> tuple[dict, list]:
-    """(per-version vuln ids, items). One query per version; no version -> all known vulns."""
-    per_version, items = {}, {}
+def _osv(package: str, osv_ecosystem: str, versions: list) -> tuple[dict, list, dict]:
+    """(per-version vuln ids, items, {"withdrawn": ids}). One query per version; no version -> all known vulns."""
+    per_version, items, withdrawn = {}, {}, set()
     for v in versions or [None]:
         body = {"package": {"name": package, "ecosystem": osv_ecosystem}}
         if v:
@@ -59,6 +59,8 @@ def _osv(package: str, osv_ecosystem: str, versions: list) -> tuple[dict, list]:
         if not res["ok"]:
             raise RuntimeError(res["error"])
         found = res["data"].get("vulns", [])
+        withdrawn |= {x["id"] for x in found if x.get("withdrawn")}  # retracted: not a vulnerability
+        found = [x for x in found if not x.get("withdrawn")]
         if v:
             per_version[v] = [x["id"] for x in found]
         for x in found:
@@ -68,13 +70,13 @@ def _osv(package: str, osv_ecosystem: str, versions: list) -> tuple[dict, list]:
                 "summary": (x.get("summary") or x.get("details", ""))[:110], "aliases": x.get("aliases", [])[:3],
                 "affected": sorted({ver for a in x.get("affected", []) for ver in a.get("versions", [])})[:8],
                 "url": f"https://osv.dev/vulnerability/{x['id']}"}
-    return per_version, list(items.values())
+    return per_version, list(items.values()), {"withdrawn": sorted(withdrawn)}
 
 
 # ---------- GitHub advisories ----------
 
-def _github(package: str, gh_ecosystem: str, versions: list) -> tuple[dict, list]:
-    per_version, items = {}, {}
+def _github(package: str, gh_ecosystem: str, versions: list) -> tuple[dict, list, dict]:
+    per_version, items, withdrawn = {}, {}, set()
     for v in versions or [None]:
         ids = []
         for kind in ("malware", "reviewed"):  # malware first: it is the most urgent
@@ -83,6 +85,9 @@ def _github(package: str, gh_ecosystem: str, versions: list) -> tuple[dict, list
             if not res["ok"]:
                 raise RuntimeError(res["error"])
             for a in res["data"]:
+                if a.get("withdrawn_at"):  # retracted (e.g. GHSA-27h2-hvpr-p74q, or a duplicate): not a vulnerability
+                    withdrawn.add(a["ghsa_id"])
+                    continue
                 mine = [x for x in a["vulnerabilities"] if x["package"]["name"] == package]
                 ids.append(a["ghsa_id"])
                 items[a["ghsa_id"]] = {
@@ -93,7 +98,7 @@ def _github(package: str, gh_ecosystem: str, versions: list) -> tuple[dict, list
                     "url": a["html_url"]}
         if v:
             per_version[v] = ids
-    return per_version, list(items.values())
+    return per_version, list(items.values()), {"withdrawn": sorted(withdrawn)}
 
 
 # ---------- NVD ----------
@@ -134,11 +139,15 @@ def _nvd(vendor: str, product: str, versions: list) -> tuple[dict, list, dict]:
     if not count["ok"]:
         raise RuntimeError(count["error"])
     total = count["data"]["totalResults"]
+    if not total:  # zero CVEs can mean "none" or "wrong vendor/product": it does not count as an answer
+        return {}, [], {"cpe": cpe, "status": f"no match: NVD has no CVE under {cpe}; NVD may name the vendor or product differently"}
     page = http.get(NVD, params={"virtualMatchString": cpe, "resultsPerPage": NVD_PAGE,
                                  "startIndex": max(0, total - NVD_PAGE)})  # NVD sorts oldest first
     if not page["ok"]:
         raise RuntimeError(page["error"])
-    cves = sorted((v["cve"] for v in page["data"]["vulnerabilities"]), key=lambda c: c["published"], reverse=True)
+    all_cves = [v["cve"] for v in page["data"]["vulnerabilities"]]
+    rejected = sorted(c["id"] for c in all_cves if c.get("vulnStatus") == "Rejected")  # retracted CVEs
+    cves = sorted((c for c in all_cves if c.get("vulnStatus") != "Rejected"), key=lambda c: c["published"], reverse=True)
     per_version = {}
     for v in versions:
         parsed = _version(v)
@@ -149,7 +158,7 @@ def _nvd(vendor: str, product: str, versions: list) -> tuple[dict, list, dict]:
         severity, score = _severity(c)
         items.append({"id": c["id"], "source": "nvd", "type": "vulnerability", "severity": severity, "score": score,
                       "summary": c["descriptions"][0]["value"][:110], "url": f"https://nvd.nist.gov/vuln/detail/{c['id']}"})
-    return per_version, items, {"cpe": cpe, "total_for_product": total, "checked_newest": len(cves)}
+    return per_version, items, {"cpe": cpe, "total_for_product": total, "checked_newest": len(cves), "withdrawn": rejected}
 
 
 # ---------- endoflife.date ----------
@@ -157,7 +166,7 @@ def _nvd(vendor: str, product: str, versions: list) -> tuple[dict, list, dict]:
 def _endoflife(product: str, versions: list) -> dict:
     res = http.get(f"https://endoflife.date/api/{product}.json")
     if not res["ok"]:
-        if "404" in res["error"]:
+        if "404" in res["error"]:  # a wrong id and an untracked product look the same
             return {"listed": False}
         raise RuntimeError(res["error"])
     today = date.today().isoformat()
@@ -206,12 +215,22 @@ def check_vulnerabilities(package: str, ecosystem: str | None = None, versions: 
         return {"ok": False, "error": f"unknown ecosystem '{ecosystem}' (use one of {sorted(ECOSYSTEMS)})"}
     if not _valid_name(package, eco):
         return {"ok": False, "error": f"'{package}' is not a valid {eco or 'package'} name; it was not checked"}
-    versions = [str(v).strip() for v in (versions or []) if str(v).strip()][:MAX_VERSIONS]
+    versions = list(dict.fromkeys(str(v).strip() for v in (versions or []) if str(v).strip()))
     bad = [v for v in versions if _version(v) is None]
     if bad:
-        return {"ok": False, "error": f"not valid versions: {bad}. List each exact version, e.g. ['2.4.1', '2.4.2']"}
+        return {"ok": False, "error": f"not valid versions: {bad}. List each exact version, e.g. ['1.0.0', '1.0.1']"}
+    # At most MAX_VERSIONS per call (each costs 3 requests): the newest are checked, the rest are returned, never dropped.
+    versions = sorted(versions, key=_version)
+    skipped, versions = versions[:-MAX_VERSIONS], versions[-MAX_VERSIONS:]
 
+    confirmed = registries.exists(package, eco) if eco else None
+    if confirmed is False:  # a name that does not exist would otherwise come back as "no advisories"
+        return {"ok": False, "error": f"'{package}' does not exist in the {eco} registry; nothing was checked (check the spelling)"}
     result = {"ok": True, "package_checked": package, "ecosystem": eco, "versions_checked": versions, "sources": {}}
+    if eco:
+        result["package_confirmed"] = bool(confirmed)  # False: no registry lookup for this ecosystem, or no answer
+    if skipped:
+        result["not_checked_versions"] = skipped
     if not versions:
         result["note"] = "no version given: showing known issues for any version; give exact versions for a precise check"
     per_version = {v: {"malware": [], "vulnerabilities": []} for v in versions}
@@ -219,8 +238,13 @@ def check_vulnerabilities(package: str, ecosystem: str | None = None, versions: 
 
     def run(name, fn, *args):  # one failing source never hides the others
         try:
-            pv, found = fn(*args)[:2]
-            result["sources"][name] = "ok"
+            pv, found, extra = fn(*args)
+            result["sources"][name] = extra.get("status", "ok")
+            if extra.get("cpe"):
+                result["nvd_cpe"] = extra["cpe"]  # the id used, so a reader can see what was looked up
+            if extra.get("withdrawn"):  # shown, so a reader who knows the id sees why it is not counted
+                result.setdefault("withdrawn_ignored", []).extend(i for i in extra["withdrawn"]
+                                                                  if i not in result.get("withdrawn_ignored", []))
             for v, ids in pv.items():
                 for i in ids:
                     kind = next((x["type"] for x in found if x["id"] == i), "vulnerability")
@@ -244,7 +268,8 @@ def check_vulnerabilities(package: str, ecosystem: str | None = None, versions: 
     if CPE_RE.match(product):
         try:
             eol = _endoflife(product, versions)
-            result["sources"]["endoflife"] = "ok" if eol["listed"] else "not listed"
+            result["sources"]["endoflife"] = "ok" if eol["listed"] else (
+                f"no match: '{product}' is not an endoflife.date product id (it may be listed under another id, or not tracked)")
             if eol["listed"]:
                 result["endoflife"] = {k: eol[k] for k in ("supported_cycles", "url")}
                 for v, info in eol["per_version"].items():

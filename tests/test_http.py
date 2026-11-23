@@ -59,3 +59,37 @@ def test_params_are_part_of_cache_key():
     url = "https://endoflife.date/api/php.json"
     http._cache_path(url + "?v=1").write_text(json.dumps({"url": url, "fetched_at": time.time(), "data": "one"}))
     assert http.get(url, params={"v": "1"})["data"] == "one"
+
+
+class FakeResponse:
+    def __init__(self, status):
+        self.status_code = status
+
+
+@pytest.mark.parametrize("status,words", [(403, "rate limited or forbidden"), (429, "rate limited or forbidden"),
+                                          (404, "not found")])
+def test_rate_limit_and_not_found_give_clear_errors(monkeypatch, status, words):
+    """Edge case 5: GitHub rate limit / 403 -> clear message, never a crash."""
+    monkeypatch.setattr(http, "_fetch", lambda *a: FakeResponse(status))
+    r = http.get("https://api.github.com/repos/a/b")
+    assert r["ok"] is False and words in r["error"]
+
+
+def test_huge_file_is_truncated_with_a_note(monkeypatch):
+    """Edge case 12: huge files are cut to ~3,500 characters with a 'continue at line N' note."""
+    from oss_agent import tools
+    url = "https://raw.githubusercontent.com/a/b/" + "c" * 40 + "/big.txt"
+    http._cache_path(url).write_text(json.dumps({"url": url, "fetched_at": time.time(), "data": "x" * 200 + "\n" * 5000}))
+    monkeypatch.setattr(tools, "_head_sha", lambda repo: {"ok": True, "sha": "c" * 40})
+    http.OFFLINE = True
+    r = tools.read_file("a/b", "big.txt", 1, 200)
+    assert r["ok"] and len(r["content"]) <= tools.MAX_FILE_CHARS + 50 and r["note"].startswith("truncated: call again")
+
+
+def test_corrupt_or_foreign_cache_entry_is_a_miss_not_a_crash():
+    url = "https://api.github.com/repos/a/b"
+    http._cache_path(url).write_text('{"url": "x", "fetched_at": 0}')  # no data, no error
+    http.OFFLINE = True
+    assert http.get(url)["ok"] is False
+    http._cache_path(url).write_text("{not json")
+    assert http.get(url)["ok"] is False
