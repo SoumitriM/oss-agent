@@ -1,6 +1,6 @@
 # OSS Due-Diligence Agent
 
-Ask a question in plain words about an open-source component, such as *"Can we add dayjs to our new web app?"*. The agent checks the component's **licence, security, maintenance, privacy** and, for AI-agent skills, the **skill file itself**. The answer gives a decision, a confidence level and evidence for every finding.
+Ask a question in plain words about an open-source component, such as *"Can we add dayjs to our new web app?"*. The agent checks the component's **licence, security, maintenance and privacy**. The answer gives a decision, a confidence level and evidence for every finding.
 
 It is a prototype (MVP) for decision makers who are not engineers. Every claim in an answer has a quote from a public source and a link to it. Anything the agent could not verify is left out or listed as a limitation.
 

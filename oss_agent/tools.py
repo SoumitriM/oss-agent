@@ -8,8 +8,7 @@ from urllib.parse import quote
 from langchain_core.tools import StructuredTool
 
 from oss_agent import http, registries, rules
-from oss_agent.rules import EVIDENCE_LEVELS, LEGAL_TAGS, SKILL_CATEGORIES
-from oss_agent.skills import scan_skill
+from oss_agent.rules import LEGAL_TAGS
 from oss_agent.versions import find_version
 from oss_agent.vulns import NPM_RE, check_vulnerabilities
 
@@ -163,7 +162,7 @@ def _repo_info(repo: str) -> dict:
                                       "read it before deciding.")
     else:
         result["root_licence_files"] = None  # unknown: never read as "no licence file"
-    if result["root_licence_files"] == [] and not lic["ok"]:  # monorepos and skill collections license per folder
+    if result["root_licence_files"] == [] and not lic["ok"]:  # monorepos license per folder
         sub = http.get(f"{GH}/search/code", params={"q": f"filename:LICENSE repo:{repo}", "per_page": 50})
         result["sub_licence_files"] = sorted(i["path"] for i in sub["data"]["items"] if "/" in i["path"]
                                              and rules.LICENCE_FILE_RE.match(i["path"].rsplit("/", 1)[-1])) if sub["ok"] else None
@@ -173,10 +172,6 @@ def _repo_info(repo: str) -> dict:
                                       "folder (or a parent folder) applies to it.")
 
     result["security_policy"] = _find_security_policy(repo, sha)
-
-    # Code search instead of the git tree: trees of big repos exceed the 2 MB cap.
-    skills = http.get(f"{GH}/search/code", params={"q": f"filename:SKILL.md repo:{repo}", "per_page": 50})
-    result["skill_files"] = [i["path"] for i in skills["data"]["items"]] if skills["ok"] else "search unavailable"
     return result
 
 
@@ -259,7 +254,7 @@ def search_code(repo: str, query: str) -> dict:
                     "(with ref for a specific version) to quote exact lines"}
 
 
-AREAS = ["licence", "security", "maintenance", "privacy", "skills"]
+AREAS = ["licence", "security", "maintenance", "privacy"]
 STATUSES = ["green", "yellow", "red", "not_checked"]
 
 TOOL_SCHEMAS = [
@@ -271,7 +266,7 @@ TOOL_SCHEMAS = [
             "RubyGems; a Go module path names its repo); never derived from the name or scope. "
             "RETURNS: description, archived flag, HEAD commit SHA and date, stars, open issues, licence SPDX "
             "id, first 60 lines of the licence file, licence-like files in the root (root_licence_files, licence_note when several or undetected), first 40 lines of SECURITY.md (repo or org-wide), "
-            "SKILL.md paths, and for monorepos package_directory. "
+            "and for monorepos package_directory. "
             "GOOD FOR: licence, maintenance, security policy, and confirming where a package's source lives."
         ),
         "input_schema": {
@@ -347,24 +342,6 @@ TOOL_SCHEMAS = [
         },
     },
     {
-        "name": "scan_skill",
-        "description": (
-            "NEEDS: a repo (owner/name) and the path of a SKILL.md (or its folder). Read-only: files are fetched "
-            "as text, never executed. "
-            "RETURNS: the skill's declared name/description, how many lines/files were scanned, and SIGNALS: "
-            "regex matches with category (instruction_override, exfiltration, secret_access, destructive, "
-            "pipe_to_shell, obfuscation, agent_directive), file, exact line, short excerpt, pinned link and an "
-            "'inspect' read_file window. Signals are SUSPICIOUS only, never proof. "
-            "GOOD FOR: finding where to look in a large skill; then inspect the relevant lines with read_file."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {"repo": {"type": "string"},
-                           "skill_path": {"type": "string", "description": "e.g. 'path/to/skill/SKILL.md'"}},
-            "required": ["repo", "skill_path"],
-        },
-    },
-    {
         "name": "search_code",
         "description": (
             "NEEDS: a repo (owner/name) and search words or identifiers. "
@@ -387,8 +364,7 @@ TOOL_SCHEMAS = [
             "RETURNS: numbered lines at that commit with a pinned link (max 200 lines / ~3,500 characters "
             "per call; a note says where to continue). "
             "GOOD FOR: quoting exact text, e.g. a custom licence (when the SPDX id is NOASSERTION), a "
-            "config default found by search_code, or the CONTEXT around a scan_skill signal (use its "
-            "'inspect' window, about 30 lines either side of the signal: targeted, not the whole file)."
+            "config default found by search_code (read the lines around it: targeted, not the whole file)."
         ),
         "input_schema": {
             "type": "object",
@@ -451,11 +427,6 @@ TOOL_SCHEMAS = [
                                     "source_tool": {"type": "string"},
                                     "tags": {"type": "array", "items": {"type": "string", "enum": LEGAL_TAGS},
                                              "description": "facts this finding shows; code maps them to legal articles"},
-                                    "category": {"type": "string", "enum": SKILL_CATEGORIES,
-                                                 "description": "for skill/security findings: what kind of behaviour"},
-                                    "evidence_level": {"type": "string", "enum": EVIDENCE_LEVELS,
-                                                       "description": "suspicious | confirmed_manipulation | confirmed_dangerous; "
-                                                                      "confirmed needs an inspected quote that itself shows it"},
                                     "why": {"type": "string", "description": "one sentence: why this evidence matters"},
                                     "uncertainty": {"type": "string", "description": "what is still unknown, if anything"},
                                 },
@@ -490,7 +461,7 @@ TOOL_SCHEMAS = [
 
 # Name -> plain function for the data tools. submit_report and ask_user are handled by graph nodes.
 DATA_TOOLS = {"get_repo_info": get_repo_info, "search_code": search_code, "read_file": read_file,
-              "check_vulnerabilities": check_vulnerabilities, "scan_skill": scan_skill, "find_version": find_version}
+              "check_vulnerabilities": check_vulnerabilities, "find_version": find_version}
 
 
 def _handled_by_graph(**kwargs) -> dict:

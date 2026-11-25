@@ -28,9 +28,6 @@ def _documents(tool_outputs: list):
             parsed = [NUMBERED_LINE.match(row) for row in r["content"].splitlines()]
             lines = [m.group(2) for m in parsed if m]
             yield lines, r["start_line"], r["url"].split("#")[0]
-        if out["tool"] == "scan_skill":  # each signal excerpt is one known line of a known file
-            for s in r.get("signals", []):
-                yield [s["excerpt"]], s["line"], s["url"].split("#")[0]
         if out["tool"] == "get_repo_info":
             for key in ("licence_file", "security_policy"):
                 if r.get(key):  # excerpts always start at line 1

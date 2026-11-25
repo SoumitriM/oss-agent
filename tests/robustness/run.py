@@ -212,8 +212,8 @@ def verify_replay() -> None:
     """Re-run every logged tool call (strict: snapshot only, no network) and compare with the logged result."""
     freeze_snapshot(strict=True)
     real = {n: getattr(tools, n) for n in ("get_repo_info", "search_code", "read_file", "check_vulnerabilities")}
-    from oss_agent import skills, versions
-    real.update(scan_skill=skills.scan_skill, find_version=versions.find_version)
+    from oss_agent import versions
+    real.update(find_version=versions.find_version)
     same = differ = 0
     for log in sorted(RUNS.glob("*.jsonl")):
         lines = [json.loads(x) for x in log.read_text().splitlines()]

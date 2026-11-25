@@ -14,8 +14,8 @@ MAX_ARG_CHARS = 500
 
 # One fixed message for every question the agent doesn't assess: out of scope, or no specific component named.
 REFUSAL = ("I won't answer this from memory. "
-           "I can only help assess a specific open-source component (a library, tool, repository or AI-agent "
-           "skill): its licence, security, maintenance and privacy, with evidence for every finding. "
+           "I can only help assess a specific open-source component (a library, tool, runtime or repository): "
+           "its licence, security, maintenance and privacy, with evidence for every finding. "
            "For example: \"Can we use <package> in our product?\"")
 TOO_LONG = f"The question is too long (max {MAX_QUESTION_CHARS} characters). Please shorten it."
 OUT_OF_SCOPE_MARKER = "OUT_OF_SCOPE"
@@ -23,7 +23,7 @@ BLOCKED = {"too_long": TOO_LONG}  # answered by code, no LLM call
 
 # Tools that only READ. Adding a tool that writes/executes requires changing this set on purpose.
 READ_ONLY_TOOLS = frozenset({"get_repo_info", "search_code", "read_file", "check_vulnerabilities",
-                             "scan_skill", "find_version"})
+                             "find_version"})
 
 INJECTION_PATTERNS = [  # phrases in TOOL OUTPUT that try to instruct an AI agent
     r"ignore (all |any |the )?(previous|prior|above|earlier|your) (instructions|rules|prompts?)",

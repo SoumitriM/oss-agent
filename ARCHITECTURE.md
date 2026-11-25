@@ -57,7 +57,6 @@ A LangGraph `StateGraph` in [oss_agent/graph.py](oss_agent/graph.py) implements 
 | `find_version` | package registries, GitHub releases, endoflife.date | the version current at a date ("latest", `YYYY-MM-DD`, "N months ago", with the date computed by code), plus every newer version number. With `when` = a version and `until` = another: every released version in that range, from the source; a version that doesn't exist is an error |
 | `search_code` | GitHub code search | matching files in the latest code (used for things like telemetry) |
 | `read_file` | raw.githubusercontent.com | numbered lines at a commit or a release tag (`ref`); never silently falls back to the latest code |
-| `scan_skill` | GitHub | pattern signals in an AI-agent skill folder (override, exfiltration, secrets…); these are signals only, never a verdict |
 | `ask_user` | the human | one clarifying question |
 | `submit_report` | — | the agent's final report (JSON schema) |
 
@@ -74,7 +73,6 @@ These are the only places where code overrides the model. Each one can only make
 | Rule 2: no unverified approval | `rules.safety` | If no vulnerability database answered (an NVD search with 0 CVEs counts as "no match", not an answer), or the wrong package was checked, security is set to not checked, and the answer can never be Recommended. |
 | Rule 4: versions not checked | `rules.safety`, `report._limitations` | The vulnerability check covers at most 10 versions per call (the newest). Any others come back as not checked. Code lists them by number as a limitation, security can't be green (so at best 🟡), and confidence drops from high to medium. |
 | Rule 5: package not confirmed | `rules.safety`, `report._limitations` | The vulnerability check first asks the package's registry whether it exists. A name the registry doesn't know is an error ("nothing was checked"). If the registry gave no answer, or the ecosystem has no registry lookup (Maven, NuGet), security can't be green, a limitation says so, and confidence drops from high to medium. |
-| Rule 3: confirmed skill claim | `rules.confirmed_needs_inspection` | "Confirmed malicious" needs a quote from lines read with `read_file`; otherwise it is downgraded to suspicious. |
 | Decision label | `report.decision` | Computed from area statuses, never written by the model. |
 | Confidence | `report._confidence` | The model proposes a level. Code can only lower it. |
 | Limitations | `report._limitations` | Lists only checks that failed: tool errors not redone, unavailable databases, removed claims. |
@@ -104,7 +102,6 @@ These are the only places where code overrides the model. Each one can only make
 | `vulns.py` | OSV, GitHub advisories, NVD, endoflife.date |
 | `versions.py` | `find_version` |
 | `registries.py` | package registries: package → repo, versions with dates, does the package exist |
-| `skills.py` | `scan_skill` patterns |
 | `evidence.py` | quote verification, evidence gaps, feedback round, removal of unsupported claims |
 | `rules.py` | the safety rules, legal references (GDPR/CRA articles for verified findings), overall status |
 | `report.py` | post-processing pipeline, decision, confidence, limitations, `present()` for the web and `render()` for the CLI |
@@ -117,7 +114,7 @@ These are the only places where code overrides the model. Each one can only make
 
 `report.post_process` runs these steps in order, with no LLM involved:
 
-verify quotes → unbacked areas to not checked → strip unsupported claims and next steps → rule 3 (skills) → rules 1, 2, 4, 5 (safety) → injection findings → legal references → overall status → confidence → checks run → limitations
+verify quotes → unbacked areas to not checked → strip unsupported claims and next steps → rules 1, 2, 4, 5 (safety) → rule 6 (privacy) → injection findings → legal references → overall status → confidence → checks run → limitations
 
 ## Design decisions
 

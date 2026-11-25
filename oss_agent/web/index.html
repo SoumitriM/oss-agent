@@ -75,7 +75,7 @@
 const ICON = { green: "🟢", yellow: "🟡", red: "🔴", not_checked: "⚪" };
 const VERDICT = { green: "OK to use", yellow: "Usable with conditions", red: "Do not adopt without review",
                   not_checked: "Not enough information" };
-const AREAS = ["licence", "security", "maintenance", "privacy", "skills"];
+const AREAS = ["licence", "security", "maintenance", "privacy"];
 // Three eval cases (tests/test_cases.json): a licence check (green) and two reds.
 const EXAMPLES = ["Can we use pallets/flask in a commercial product?",            // green: permissive licence
                   "Our new web app pins axios/axios 1.14.1. Can we keep it?",     // red: malicious release
@@ -178,14 +178,12 @@ function renderReport(p, s) {  // p = report.present(): the important part first
     area.appendChild(el("div", "name s-" + item.status, `${ICON[item.status]} ${item.area.toUpperCase()}`));
     area.appendChild(el("div", "", item.summary));
     for (const e of item.evidence) {
-      const tag = e.level ? `[${e.level.replace(/_/g, " ")}${e.category ? " · " + e.category : ""}] ` : "";
-      area.appendChild(el("div", "", "• " + tag + e.claim));
+      area.appendChild(el("div", "", "• " + e.claim));
       area.appendChild(el("div", "quote", "“" + e.quote + "”"));
       const src = el("div", "src");
       if (e.url) { src.appendChild(document.createTextNode("→ ")); src.appendChild(link(e.url)); }
       src.appendChild(e.verified ? el("span", "ok", " ✔ verified") : el("span", "bad", " ⚠ unverified"));
       area.appendChild(src);
-      if (e.downgraded) area.appendChild(el("div", "small", "Downgraded by code: " + e.downgraded));
     }
     box.appendChild(area);
   }

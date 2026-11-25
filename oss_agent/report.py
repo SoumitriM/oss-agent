@@ -12,7 +12,7 @@ from oss_agent.tools import AREAS, STATUSES
 ICON = {"green": "🟢", "yellow": "🟡", "red": "🔴", "not_checked": "⚪"}
 DECISION = {"green": "Recommended", "yellow": "Usable with conditions", "red": "Do not adopt"}
 INSUFFICIENT = "Insufficient evidence to approve"
-LABEL = {"licence": "Licence", "security": "Security", "maintenance": "Maintenance", "privacy": "Privacy", "skills": "Skill"}
+LABEL = {"licence": "Licence", "security": "Security", "maintenance": "Maintenance", "privacy": "Privacy"}
 
 
 def validate(report) -> str | None:
@@ -50,12 +50,11 @@ def post_process(report: dict, repo_info: dict | None, tool_outputs: list = (), 
     report["findings"] = evidence.verify(report["findings"], tool_outputs)
     evidence.unbacked_to_not_checked(report)  # before stripping: an area backed only by an unverified claim is not checked
     report["left_out"] = evidence.strip_unsupported(report, tool_outputs, asked_text or report.get("question", ""))
-    rules.confirmed_needs_inspection(report["findings"], tool_outputs)
     rules.safety(report, tool_outputs, asked_text or report.get("question", ""))
     rules.privacy_gate(report)
     for o in tool_outputs:  # instruction-like text in tool output: always shown, never followed
         for hit in o["result"].get("injections", [])[:2]:
-            report["findings"].append({"area": "skills" if o["tool"] == "scan_skill" else "security",
+            report["findings"].append({"area": "security",
                                        "claim": f"Content returned by {o['tool']} contains text aimed at AI agents. It was "
                                                 "treated as data and not followed; its context decides whether it matters.",
                                        "evidence_quote": hit["snippet"], "url": hit["url"] or "", "verified": True,
@@ -79,7 +78,7 @@ def _confidence(report: dict) -> dict:
     reason = c.get("reason") or "No confidence was given."
     if decision(report)[1] == INSUFFICIENT and level != "low":
         level, reason = "low", "Not enough checked evidence to approve. " + reason
-    elif (report.get("left_out") or any(f.get("downgraded") for f in report["findings"])) and level == "high":
+    elif report.get("left_out") and level == "high":
         level, reason = "medium", "Some statements could not be confirmed and were left out. " + reason
     elif any("not checked for vulnerabilities" in x or "could not be confirmed in its registry" in x
              for x in report.get("limitations", [])) and level == "high":
@@ -117,10 +116,6 @@ def _checks_run(tool_outputs: list) -> list:
                          "url": f"https://github.com/search?q={quote('repo:' + str(a.get('repo')) + ' ' + str(a.get('query')))}&type=code"})
         elif tool == "read_file":
             rows.append({"tool": tool, "text": f"{r.get('path', a.get('path'))}, lines {r.get('start_line', '?')}-{r.get('end_line', '?')}", "url": r.get("url", "")})
-        elif tool == "scan_skill":
-            rows.append({"tool": tool, "text": f"{r.get('skill_path')} ({r.get('skill_lines', '?')} lines, "
-                                 f"{sum(r.get('signal_counts', {}).values())} lines flagged for inspection)",
-                         "url": f"https://github.com/{r.get('repo')}/blob/{r.get('commit')}/{r.get('skill_path')}"})
     return rows
 
 
@@ -169,8 +164,7 @@ def _limitations(report: dict, tool_outputs: list) -> list:
 
 
 LABELS = {"get_repo_info": "Repository facts (licence, activity)", "check_vulnerabilities": "Vulnerability databases",
-          "find_version": "Version lookup", "search_code": "Code search", "read_file": "File read",
-          "scan_skill": "Skill scan"}
+          "find_version": "Version lookup", "search_code": "Code search", "read_file": "File read"}
 
 
 ANSWER = "Answer"
@@ -183,14 +177,13 @@ def is_answer(report: dict) -> bool:
 
 
 def decision(report: dict) -> tuple[str, str]:
-    """(icon, text) from the statuses only. Approval needs a security (or skill) check backed by evidence."""
+    """(icon, text) from the statuses only. Approval needs a security check backed by evidence."""
     areas = report["areas"]
     if report["overall"] == "red":
         return ICON["red"], DECISION["red"]
     if is_answer(report):
         return "ℹ️", ANSWER
-    assessed = areas["security"]["status"] != "not_checked" or areas["skills"]["status"] != "not_checked"
-    if report["overall"] == "not_checked" or not assessed:
+    if report["overall"] == "not_checked" or areas["security"]["status"] == "not_checked":
         return ICON["not_checked"], INSUFFICIENT
     return ICON[report["overall"]], DECISION[report["overall"]]
 
@@ -228,8 +221,7 @@ def present(report: dict) -> dict:
                     "summary": areas[a]["summary"] + (f" ({', '.join(articles)})" if articles else ""),
                     "notes": [], "versions": [],
                     "evidence": [{"claim": f["claim"], "quote": _short(f.get("evidence_quote", "")), "url": f.get("url", ""),
-                                  "verified": bool(f.get("verified")), "level": f.get("evidence_level"),
-                                  "category": f.get("category"), "where": None, "downgraded": f.get("downgraded")}
+                                  "verified": bool(f.get("verified")), "where": None}
                                  for f in findings]})
     follow_up = report.get("open_questions", [])[:2]  # facts only the user knows that could change the answer
     not_verified = []
@@ -269,11 +261,8 @@ def render(report: dict) -> str:
     for item in p["why"]:
         out.append(wrap(f"{ICON[item['status']]} {LABEL[item['area']]}: {item['summary']}", " "))
         for e in item["evidence"]:
-            tag = f"[{e['level'].replace('_', ' ')}{' · ' + e['category'] if e.get('category') else ''}] " if e["level"] else ""
-            out.append(wrap(f"• {tag}{e['claim']}", "   "))
+            out.append(wrap(f"• {e['claim']}", "   "))
             out.append(f"     \"{e['quote']}\" → {e['url']} {'✔' if e['verified'] else '⚠ unverified'}")
-            if e.get("downgraded"):
-                out.append(wrap(f"(downgraded by code: {e['downgraded']})", "     "))
         out += [wrap(n, "   ") for n in item["notes"]]
     if p["next"]:
         out += ["", "What to do next"]

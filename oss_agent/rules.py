@@ -2,20 +2,16 @@
 
   1. a published malicious release of an asked version  -> security red, never approved
   2. security not backed by a working vulnerability check -> security not_checked, never approved
-  3. confirmed skill claims need an instruction quoted from lines read with read_file
   4. versions passed to the vulnerability check but not checked (over its limit) -> security never green
   5. a package its registry did not confirm exists (a misspelled name also finds "no advisories") -> never green
   6. privacy required (the agent decided it: privacy asked about, or personal/customer/user data involved) but
      no privacy result -> sent back once, then shown as "incomplete" with the reason, never left out
      (plus, in checks: an area status without a verified finding -> not_checked)
-Everything else (licence, end of life, severity, applicability, privacy, skills) is the agent's judgement.
+Everything else (licence, end of life, severity, applicability, privacy) is the agent's judgement.
 """
 import re
 
 RANK = {"green": 0, "not_checked": 0, "yellow": 1, "red": 2}
-EVIDENCE_LEVELS = ["suspicious", "confirmed_manipulation", "confirmed_dangerous"]
-SKILL_CATEGORIES = ["instruction_override", "exfiltration", "secret_access", "destructive", "pipe_to_shell",
-                    "obfuscation", "agent_directive", "off_purpose_instructions", "other"]
 LICENCE_FILE_RE = re.compile(r"^(licen[cs]e|copying|unlicense)([.\-_].*)?$", re.IGNORECASE)
 
 MALWARE_HEADLINE = "Do not use: malicious release"
@@ -103,18 +99,6 @@ def _failure(r: dict, asked_text: str) -> str:
         return f"'{r['package_checked']}' was checked, which is not the package asked about"
     return "no vulnerability database answered (" + "; ".join(f"{k} {v}" for k, v in r["sources"].items()
                                                               if k in VULN_SOURCES) + ")"
-
-
-def confirmed_needs_inspection(findings: list, tool_outputs: list) -> None:
-    """Rule 3: a confirmed skill claim must quote lines the agent actually read; otherwise it is suspicious."""
-    read = " ".join(" ".join(o["result"].get("content", "").split()) for o in tool_outputs
-                    if o["tool"] == "read_file" and o["result"].get("ok"))
-    read = re.sub(r"\s*\d+\| ?", " ", read)
-    for f in findings:
-        quote = " ".join(str(f.get("evidence_quote", "")).split())
-        if str(f.get("evidence_level", "")).startswith("confirmed") and (not quote or quote not in " ".join(read.split())):
-            f["downgraded"] = f"{f['evidence_level']} needs the instruction quoted from lines read with read_file"
-            f["evidence_level"] = "suspicious"
 
 
 PRIVACY_GAP = ("privacy_check_required is true but the privacy area has no result: check what the component "

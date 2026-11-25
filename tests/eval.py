@@ -75,9 +75,6 @@ def check(case: dict, state: dict) -> dict:
     for area, status in exp.get("areas", {}).items():
         got = report["areas"][area]["status"] if report else "none"
         checks[f"area:{area}"] = (got in (status if isinstance(status, list) else [status]), got)
-    if "min_inspected" in exp:  # targeted follow-up: flagged lines were actually looked at (quality, not sequence)
-        n = len([c for c in data_calls if c == "read_file"])
-        checks["inspected"] = (n >= exp["min_inspected"], f"{n}>={exp['min_inspected']}")
     if "not_headline" in exp:
         checks["not_headline"] = ((report or {}).get("headline") != exp["not_headline"], (report or {}).get("headline") or "-")
     if "headline" in exp:
