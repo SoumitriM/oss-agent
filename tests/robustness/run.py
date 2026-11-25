@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 
 from dotenv import load_dotenv  # noqa: E402
 
-from oss_agent import graph, guard, http, llm, register, report as rep, tools  # noqa: E402
+from oss_agent import graph, guard, http, llm, report as rep, tools  # noqa: E402
 
 HERE = Path(__file__).parent
 CASES = HERE / "cases.json"
@@ -70,7 +70,7 @@ def decision_of(state: dict) -> str:
     if state.get("report"):
         return rep.decision(state["report"])[1]
     answer = state.get("answer") or ""
-    return {guard.REFUSAL: "Refusal", guard.GENERAL_REPLY: "General pointer", guard.TOO_LONG: "Too long"}.get(answer, "Direct answer")
+    return {guard.REFUSAL: "Refusal", guard.TOO_LONG: "Too long"}.get(answer, "Direct answer")
 
 
 def run_one(app, run_id: str, question: str) -> dict:
@@ -212,18 +212,15 @@ def verify_replay() -> None:
     """Re-run every logged tool call (strict: snapshot only, no network) and compare with the logged result."""
     freeze_snapshot(strict=True)
     real = {n: getattr(tools, n) for n in ("get_repo_info", "search_code", "read_file", "check_vulnerabilities")}
-    from oss_agent import skills, versions, register as reg
-    real.update(scan_skill=skills.scan_skill, find_version=versions.find_version, lookup_register=reg.lookup_register)
-    same = differ = skipped = 0
+    from oss_agent import skills, versions
+    real.update(scan_skill=skills.scan_skill, find_version=versions.find_version)
+    same = differ = 0
     for log in sorted(RUNS.glob("*.jsonl")):
         lines = [json.loads(x) for x in log.read_text().splitlines()]
         if lines[0].get("fault"):
             continue  # faults change results on purpose
         for e in lines:
             if e.get("event") != "tool_call" or e.get("tool") not in real:
-                continue
-            if e["tool"] == "lookup_register":
-                skipped += 1
                 continue
             again = real[e["tool"]](**(e.get("args") or {}))
             strip = lambda d: {k: v for k, v in d.items() if k != "as_of"} if isinstance(d, dict) else d  # "today" moves
@@ -232,7 +229,7 @@ def verify_replay() -> None:
             else:
                 differ += 1
                 print(f"DIFFERS: {log.name} {e['tool']} {json.dumps(e.get('args'))[:80]}")
-    print(f"replay: {same} identical, {differ} different, {skipped} skipped (local register)")
+    print(f"replay: {same} identical, {differ} different")
 
 
 # ---------- report ----------
@@ -302,8 +299,6 @@ def main() -> None:
     if a.verify_replay:
         return verify_replay()
     if not a.report_only:
-        import tempfile
-        register.REGISTER_PATH = Path(tempfile.mkdtemp()) / "register.jsonl"  # never touch the real register
         freeze_snapshot()
         install_faults()
         try:

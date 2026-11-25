@@ -1,1 +1,0 @@
-{"url": "https://services.nvd.nist.gov/rest/json/cves/2.0?virtualMatchString=cpe%3A2.3%3Aa%3Areact-scripts%3Areact-scripts&resultsPerPage=1", "fetched_at": 1795456534.798988, "data": {"resultsPerPage": 0, "startIndex": 0, "totalResults": 0, "format": "NVD_CVE", "version": "2.0", "timestamp": "2026-11-23T17:55:34.740", "vulnerabilities": []}}

@@ -5,6 +5,8 @@
   3. confirmed skill claims need an instruction quoted from lines read with read_file
   4. versions passed to the vulnerability check but not checked (over its limit) -> security never green
   5. a package its registry did not confirm exists (a misspelled name also finds "no advisories") -> never green
+  6. privacy required (the agent decided it: privacy asked about, or personal/customer/user data involved) but
+     no privacy result -> sent back once, then shown as "incomplete" with the reason, never left out
      (plus, in checks: an area status without a verified finding -> not_checked)
 Everything else (licence, end of life, severity, applicability, privacy, skills) is the agent's judgement.
 """
@@ -113,6 +115,26 @@ def confirmed_needs_inspection(findings: list, tool_outputs: list) -> None:
         if str(f.get("evidence_level", "")).startswith("confirmed") and (not quote or quote not in " ".join(read.split())):
             f["downgraded"] = f"{f['evidence_level']} needs the instruction quoted from lines read with read_file"
             f["evidence_level"] = "suspicious"
+
+
+PRIVACY_GAP = ("privacy_check_required is true but the privacy area has no result: check what the component "
+               "collects or sends, or, if that could not be completed, keep privacy not_checked and say why in its summary")
+
+
+def privacy_missing(report: dict) -> bool:
+    """Rule 6: the agent said privacy is required, but the privacy area has no result."""
+    return report.get("privacy_check_required") is True and \
+        report.get("areas", {}).get("privacy", {}).get("status", "not_checked") == "not_checked"
+
+
+def privacy_gate(report: dict) -> None:
+    """Rule 6, after the feedback round: a required privacy check without a result is marked incomplete, with the
+    reason the agent gave (or that it was not done). The area is then always shown, never silently omitted."""
+    if not privacy_missing(report):
+        return
+    area = report["areas"]["privacy"]
+    reason = re.sub(r"^not checked[.:]?\s*", "", area.get("summary", "").strip(), flags=re.IGNORECASE)
+    area.update(incomplete=True, summary="Incomplete: " + (reason or "the privacy check was not done."))
 
 
 def legal_refs(findings: list, areas: dict) -> list:

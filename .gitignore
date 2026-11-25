@@ -3,4 +3,7 @@
 __pycache__/
 .pytest_cache/
 *.json.out
-register.jsonl
+# recorded HTTP responses / live cache: kept locally, not in git
+tests/fixtures/
+docs/
+.claude/

@@ -76,11 +76,10 @@ const ICON = { green: "🟢", yellow: "🟡", red: "🔴", not_checked: "⚪" };
 const VERDICT = { green: "OK to use", yellow: "Usable with conditions", red: "Do not adopt without review",
                   not_checked: "Not enough information" };
 const AREAS = ["licence", "security", "maintenance", "privacy", "skills"];
-const EXAMPLES = ["Can we use pallets/flask in a commercial product?",
-                  "Can we self-host n8n-io/n8n for workflows with customer data?",
-                  "Our portal runs PHP 8.1 (php/php-src). Do we need to act?",
-                  "Can we add axios/axios to our new web app?",
-                  "MIT vs GPL: which is safer for us?"];
+// Three eval cases (tests/test_cases.json): a licence check (green) and two reds.
+const EXAMPLES = ["Can we use pallets/flask in a commercial product?",            // green: permissive licence
+                  "Our new web app pins axios/axios 1.14.1. Can we keep it?",     // red: malicious release
+                  "Our portal runs PHP 8.1 (php/php-src). Do we need to act?"];   // red: end of life
 
 const log = document.getElementById("log");
 const form = document.getElementById("form");

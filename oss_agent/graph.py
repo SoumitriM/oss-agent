@@ -10,15 +10,14 @@ START → guard → agent ─route_after_agent─┬─ no tool calls, no tools 
        tools ─route_after_tools──┬─ report accepted (evidence ok, or after one feedback round) → checks
                                  ├─ report invalid twice → force_report
                                  └─ otherwise ──────────→ agent
-       checks → approve (human) ─┬─ approved → register (append to register.jsonl) → END
-                                 └─ rejected → END  (record shown, not saved)
-Human steps use interrupt(): the graph pauses, run() asks the human (or a script) and resumes it.
+       checks → END
+The ask step uses interrupt(): the graph pauses, run() asks the human (or a script) and resumes it.
 """
 import copy
 import json
 import operator
+import os
 import time
-from datetime import datetime, timezone
 from typing import Annotated, Callable, TypedDict
 
 from langchain_core.messages import AIMessage, ToolMessage
@@ -27,7 +26,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import Command, interrupt
 
-from oss_agent import evidence, guard, llm, register, report as rep, rules
+from oss_agent import evidence, guard, llm, prompts_haiku, report as rep, rules
 from oss_agent.prompts import SYSTEM_PROMPT
 from oss_agent.tools import DATA_TOOLS, LC_TOOLS, TOOL_SCHEMAS
 
@@ -52,7 +51,6 @@ class State(TypedDict):
     nudges: int                                 # "finish with submit_report" reminders sent
     answer: str | None                         # direct answer when no tools were needed
     questions_asked: int                        # ask_user interrupts so far (max 2)
-    decision: dict | None                       # approve step: {"approved", "comment", "at"}
     trace: Annotated[list, operator.add]        # one entry per node run / tool call
 
 
@@ -61,7 +59,7 @@ def initial_state(question: str) -> dict:
     # only wrapper/system tags are neutralised so the question cannot fake tool data or instructions.
     return {"question": question, "scope": "ok", "messages": [("user", guard.neutralise(question))], "steps": 0,
             "tool_outputs": [], "repo_info": None, "report": None, "report_retries": 0, "evidence_rounds": 0, "nudges": 0,
-            "answer": None, "questions_asked": 0, "decision": None, "trace": []}
+            "answer": None, "questions_asked": 0, "trace": []}
 
 
 def run(app, question: str, answer_fn: Callable[[dict], str], thread_id: str = "cli") -> dict:
@@ -120,10 +118,14 @@ def build_graph(model=None):
     # Read-only by construction: a data tool that is not declared read-only stops the agent at start-up.
     assert set(DATA_TOOLS) <= guard.READ_ONLY_TOOLS, f"non read-only tools: {set(DATA_TOOLS) - guard.READ_ONLY_TOOLS}"
     model = model or llm.get_model(LC_TOOLS)
+    # Smaller models get the same prompt with stricter "when to stop" principles (prompts_haiku.py).
+    # PROMPT=haiku forces it for any model (to compare prompts on the same model).
+    use_haiku = os.getenv("PROMPT") == "haiku" or "haiku" in os.getenv("LLM_MODEL", "").lower()
+    system_prompt = prompts_haiku.SYSTEM_PROMPT if use_haiku else SYSTEM_PROMPT
 
     def agent(state: State) -> dict:
         started = time.time()
-        reply = llm.invoke(model, [llm.system_message(SYSTEM_PROMPT), *state["messages"]])
+        reply = llm.invoke(model, [llm.system_message(system_prompt), *state["messages"]])
         u = reply.usage_metadata or {}
         names = [c["name"] for c in reply.tool_calls]
         entry = {"node": "agent", "step": state["steps"] + 1, "detail": "→ " + ", ".join(names) if names else "no tool call",
@@ -135,12 +137,10 @@ def build_graph(model=None):
         update = {"messages": [reply], "steps": state["steps"] + 1, "trace": [entry]}
         if not names:  # no answer from memory: every reply without evidence becomes a fixed message from code
             tools_used = any(isinstance(m, ToolMessage) for m in state["messages"])
-            if guard.OUT_OF_SCOPE_MARKER in reply.text:  # scope is enforced by code: a fixed refusal, never the model's own text
+            out_of_scope = guard.OUT_OF_SCOPE_MARKER in reply.text  # the model's marker, or no tools: never its own text
+            if out_of_scope or not tools_used:
                 update["answer"], update["scope"] = guard.REFUSAL, "out_of_scope"
-                entry["detail"] = "out of scope → fixed refusal"
-            elif not tools_used:  # a general question (no specific component): point the user elsewhere
-                update["answer"], update["scope"] = guard.GENERAL_REPLY, "general"
-                entry["detail"] = "general question → fixed pointer"
+                entry["detail"] = ("out of scope" if out_of_scope else "general question") + " → fixed refusal"
             else:
                 update["answer"] = reply.text
         return update
@@ -166,6 +166,7 @@ def build_graph(model=None):
                 error = rep.validate(call["args"]["report"])
                 asked = " ".join([state["question"]] + [t.get("answer", "") for t in state["trace"] if t["node"] == "ask"])
                 gaps = evidence.gaps(call["args"]["report"], state["tool_outputs"] + update["tool_outputs"], asked) \
+                    + ([rules.PRIVACY_GAP] if rules.privacy_missing(call["args"]["report"]) else []) \
                     if error is None else []
                 if gaps and state["evidence_rounds"] == 0:  # one feedback round: the agent fixes its own report
                     update["evidence_rounds"] = 1
@@ -233,27 +234,11 @@ def build_graph(model=None):
                           "detail": answer[:70], "answer": answer})
         return {"messages": messages, "questions_asked": asked, "trace": trace}
 
-    def approve(state: State) -> dict:
-        """Human in the loop: the decision maker approves (and may comment) before anything is saved."""
-        raw = str(interrupt({"type": "approve", "report": state["report"]})).strip()
-        word, _, comment = raw.partition(" ")
-        decision = {"approved": word.lower() in ("y", "yes", "ja", "approve", "approved"), "comment": comment.strip(),
-                    "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-        detail = "approved" if decision["approved"] else "rejected: record shown, not saved"
-        return {"decision": decision, "trace": [{"node": "approve", "step": state["steps"], "detail": detail}]}
-
-    def save(state: State) -> dict:
-        record = {**state["report"], "decision": state["decision"], "saved_at": state["decision"]["at"]}
-        register.append(record)
-        return {"trace": [{"node": "register", "step": state["steps"], "detail": f"saved to {register.REGISTER_PATH.name}"}]}
-
     def route_after_agent(state: State) -> str:
         calls = state["messages"][-1].tool_calls
         tools_used = any(isinstance(m, ToolMessage) for m in state["messages"])
-        if not calls and state["scope"] == "out_of_scope":
-            return END  # fixed refusal, decided by code
-        if not calls and not tools_used:  # general or out-of-scope question: fixed message from the agent node
-            return END
+        if not calls and (state["scope"] == "out_of_scope" or not tools_used):
+            return END  # fixed refusal, set by the agent node
         if any(c["name"] == "submit_report" for c in calls):
             return "tools"  # always let a report through, even on the last step
         if state["steps"] >= MAX_STEPS or (not calls and state["nudges"] >= 1):
@@ -279,8 +264,6 @@ def build_graph(model=None):
     g.add_node("force_report", force_report)
     g.add_node("checks", checks)
     g.add_node("ask", ask)
-    g.add_node("approve", approve)
-    g.add_node("register", save)
     g.add_edge(START, "guard")
     g.add_conditional_edges("guard", lambda s: END if s["scope"] in guard.BLOCKED else "agent", ["agent", END])
     g.add_conditional_edges("agent", route_after_agent, ["tools", "ask", "nudge", "force_report", END])
@@ -288,7 +271,5 @@ def build_graph(model=None):
     g.add_edge("nudge", "agent")
     g.add_conditional_edges("tools", route_after_tools, ["checks", "force_report", "agent", "ask"])
     g.add_edge("force_report", "checks")
-    g.add_edge("checks", "approve")
-    g.add_conditional_edges("approve", lambda s: "register" if s["decision"]["approved"] else END, ["register", END])
-    g.add_edge("register", END)
+    g.add_edge("checks", END)
     return g.compile(checkpointer=MemorySaver())

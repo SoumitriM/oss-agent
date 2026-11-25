@@ -136,4 +136,3 @@ def _request(url: str, headers: dict | None, as_json: bool, body: dict | None) -
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"url": url, "fetched_at": time.time(), "data": data}))
         return {"ok": True, "data": data}
-    return {"ok": False, "error": "server error after retry"}

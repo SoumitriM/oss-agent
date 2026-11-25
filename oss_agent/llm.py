@@ -5,7 +5,9 @@ LLM_PROVIDER:
                 used as a plain model. All its built-in tools are disabled, so it can
                 only reply with JSON; the graph decides what runs.
   anthropic   - ChatAnthropic (Messages API, native tool calling, needs an API key).
-Both return a LangChain AIMessage with .tool_calls, so graph.py is provider-agnostic.
+  openrouter  - ChatOpenAI on OpenRouter's OpenAI-compatible API (native tool calling, needs
+                OPENROUTER_API_KEY; LLM_MODEL is an OpenRouter id, e.g. anthropic/claude-opus-4.6).
+All return a LangChain AIMessage with .tool_calls, so graph.py is provider-agnostic.
 """
 import json
 import os
@@ -21,9 +23,22 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 DEFAULT_MODEL = "claude-sonnet-5-5"
 MAX_TOKENS = 8000
 CLI_TIMEOUT_S = 180
+OPENROUTER_URL = "https://openrouter.ai/api/v1"
 # Prompt caching (API backend): the tool list + system prompt are identical on every call, so one breakpoint
 # after the system prompt caches both (tools render before it). The conversation is not cached. 5-minute TTL.
 CACHE = {"type": "ephemeral"}
+
+
+# --haiku (CLI and server) picks Haiku and its prompt; otherwise Sonnet. Ids differ per provider.
+MODELS = {"sonnet": {"openrouter": "anthropic/claude-sonnet-5.5", "default": "claude-sonnet-5-5"},
+          "haiku": {"openrouter": "anthropic/claude-haiku-5.5", "default": "claude-haiku-5-5"}}
+
+
+def choose_model(haiku: bool) -> str:
+    """Set LLM_MODEL from the --haiku flag (overrides .env). graph.py picks the prompt from the model name."""
+    ids = MODELS["haiku" if haiku else "sonnet"]
+    os.environ["LLM_MODEL"] = ids.get(os.getenv("LLM_PROVIDER", "claude_cli"), ids["default"])
+    return os.environ["LLM_MODEL"]
 
 
 class LLMError(Exception):
@@ -41,26 +56,36 @@ def get_model(tools: list):
             raise LLMError("ANTHROPIC_API_KEY is not set (copy .env.example to .env and fill it in)")
         from langchain_anthropic import ChatAnthropic
         # No temperature: Sonnet 5.5 rejects non-default sampling values.
-        chat = ChatAnthropic(
-            model=model, max_tokens=MAX_TOKENS, max_retries=1,  # SDK retries once with backoff
-            # On a safety-classifier decline, the API reruns the request on a fallback model.
-            betas=["server-side-fallback-2026-07-01"], model_kwargs={"fallbacks": "default"},
-        )
+        # On a safety-classifier decline, the API reruns the request on a fallback model (Haiku rejects this).
+        fallback = {} if "haiku" in model else {"betas": ["server-side-fallback-2026-07-01"],
+                                                "model_kwargs": {"fallbacks": "default"}}
+        chat = ChatAnthropic(model=model, max_tokens=MAX_TOKENS, max_retries=1, **fallback)  # SDK retries once
         return chat.bind_tools(tools)  # independent tools may run in the same step
-    raise LLMError(f"unknown LLM_PROVIDER '{provider}' (use claude_cli or anthropic)")
+    if provider == "openrouter":
+        if not os.getenv("OPENROUTER_API_KEY"):
+            raise LLMError("OPENROUTER_API_KEY is not set (copy .env.example to .env and fill it in)")
+        if "/" not in model:  # the default claude-sonnet-5-5 is not an OpenRouter id
+            raise LLMError(f"LLM_MODEL '{model}' is not an OpenRouter model id (e.g. anthropic/claude-opus-4.6)")
+        from langchain_openai import ChatOpenAI
+        chat = ChatOpenAI(model=model, base_url=OPENROUTER_URL, api_key=os.getenv("OPENROUTER_API_KEY"),
+                          max_tokens=MAX_TOKENS, max_retries=1)
+        return chat.bind_tools(tools)
+    raise LLMError(f"unknown LLM_PROVIDER '{provider}' (use claude_cli, anthropic or openrouter)")
 
 
 def invoke(model, messages: list) -> AIMessage:
     """model.invoke() with provider errors turned into one short LLMError."""
     import anthropic
+    import openai
+    name = os.getenv("LLM_PROVIDER", "claude_cli")
     try:
         return model.invoke(messages)
-    except anthropic.AuthenticationError:
-        raise LLMError("Anthropic API key invalid (check ANTHROPIC_API_KEY in .env)")
-    except anthropic.RateLimitError:
-        raise LLMError("Anthropic rate limit hit; wait a minute and retry")
-    except anthropic.APIError as e:
-        raise LLMError(f"Anthropic API error: {type(e).__name__}")
+    except (anthropic.AuthenticationError, openai.AuthenticationError):
+        raise LLMError(f"{name}: API key invalid (check ANTHROPIC_API_KEY or OPENROUTER_API_KEY in .env)")
+    except (anthropic.RateLimitError, openai.RateLimitError):
+        raise LLMError(f"{name}: rate limit hit; wait a minute and retry")
+    except (anthropic.APIError, openai.APIError) as e:
+        raise LLMError(f"{name} API error: {type(e).__name__}")
 
 
 def system_message(text: str) -> SystemMessage:

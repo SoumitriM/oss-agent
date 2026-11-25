@@ -8,7 +8,6 @@ from urllib.parse import quote
 from langchain_core.tools import StructuredTool
 
 from oss_agent import http, registries, rules
-from oss_agent.register import lookup_register
 from oss_agent.rules import EVIDENCE_LEVELS, LEGAL_TAGS, SKILL_CATEGORIES
 from oss_agent.skills import scan_skill
 from oss_agent.versions import find_version
@@ -287,16 +286,6 @@ TOOL_SCHEMAS = [
         },
     },
     {
-        "name": "lookup_register",
-        "description": (
-            "NEEDS: a repo (owner/name). Local file only, no network, instant. "
-            "RETURNS: our most recent earlier, approved record for that repo (date, commit, verdicts, "
-            "conditions, decision) or found=false. "
-            "GOOD FOR: re-checks, so you only need to look at what changed since that date/commit."
-        ),
-        "input_schema": {"type": "object", "properties": {"repo": {"type": "string"}}, "required": ["repo"]},
-    },
-    {
         "name": "ask_user",
         "description": (
             "NEEDS: one short question for the decision maker. Pauses until they answer. Max 2 per run "
@@ -430,6 +419,11 @@ TOOL_SCHEMAS = [
                                                 "something; answer: the user asks a specific question (what a licence "
                                                 "allows, what data it sends, what a file does)"},
                         "assumptions": {"type": "array", "items": {"type": "string"}},
+                        "privacy_check_required": {"type": "boolean",
+                                                   "description": "true if the user asks about privacy or telemetry, or the "
+                                                                  "stated use involves personal, customer or user data. Then "
+                                                                  "the privacy area needs a result, or not_checked with the "
+                                                                  "reason the check could not be completed"},
                         "areas": {
                             "type": "object",
                             "description": "One entry per area: " + ", ".join(AREAS),
@@ -486,7 +480,7 @@ TOOL_SCHEMAS = [
                                                                  "confidence rests on, or what is missing"}},
                                        "required": ["level", "reason"]},
                     },
-                    "required": ["repo", "question", "areas", "findings", "recommendation"],
+                    "required": ["repo", "question", "privacy_check_required", "areas", "findings", "recommendation"],
                 }
             },
             "required": ["report"],
@@ -496,8 +490,7 @@ TOOL_SCHEMAS = [
 
 # Name -> plain function for the data tools. submit_report and ask_user are handled by graph nodes.
 DATA_TOOLS = {"get_repo_info": get_repo_info, "search_code": search_code, "read_file": read_file,
-              "check_vulnerabilities": check_vulnerabilities, "lookup_register": lookup_register,
-              "scan_skill": scan_skill, "find_version": find_version}
+              "check_vulnerabilities": check_vulnerabilities, "scan_skill": scan_skill, "find_version": find_version}
 
 
 def _handled_by_graph(**kwargs) -> dict:

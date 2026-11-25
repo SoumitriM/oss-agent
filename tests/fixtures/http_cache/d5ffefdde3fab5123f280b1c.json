@@ -1,1 +1,0 @@
-{"url": "https://api.github.com/repos/oss-fixtures/agent-skills/contents/skills/exfil-helper?ref=fa11ed00fa11ed00fa11ed00fa11ed00fa11ed00", "fetched_at": 1795286577.1935859, "data": [{"name": "SKILL.md", "path": "skills/exfil-helper/SKILL.md", "type": "file"}, {"name": "scripts", "path": "skills/exfil-helper/scripts", "type": "dir"}]}

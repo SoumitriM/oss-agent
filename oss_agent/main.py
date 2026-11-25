@@ -1,5 +1,5 @@
 """CLI: python -m oss_agent "question" [--trace] [--offline] [--json out.json] [--show-graph]
-                                      [--answer TEXT ...] [--approve TEXT]"""
+                                      [--answer TEXT ...]"""
 import argparse
 import json
 import sys
@@ -8,7 +8,7 @@ import time
 
 from dotenv import load_dotenv
 
-from oss_agent import graph, http, llm, register, report
+from oss_agent import graph, http, llm, report
 
 
 def print_trace(trace: list) -> None:
@@ -27,18 +27,14 @@ def print_trace(trace: list) -> None:
 
 
 def make_answer_fn(script: dict | None):
-    """Answers for interrupts: from the human (input) or, offline/in eval, from a script
-    {"ask": [answers in order], "approve": "yes ..."|"no"}. Defaults: ask -> "" (unknown), approve -> "no"."""
+    """Answers to the agent's questions: from the human (input) or, offline/in eval, from a script
+    {"ask": [answers in order]}. Default: "" (unknown)."""
     def answer(payload: dict) -> str:
-        if payload["type"] == "approve":
-            print(report.render(payload["report"]))
-            prompt = "\nSave this record to the register? [yes/no, optional comment after it] > "
-        else:
-            prompt = f"\n❓ {payload['question']}\n> "
+        prompt = f"\n❓ {payload['question']}\n> "
         if script is None:
             return input(prompt)
         asks = script.setdefault("ask", [])
-        reply = (asks.pop(0) if asks else "") if payload["type"] == "ask" else script.get("approve") or "no"
+        reply = asks.pop(0) if asks else ""
         print(prompt + reply + "   (scripted)")
         return reply
     return answer
@@ -53,12 +49,13 @@ def main() -> None:
     parser.add_argument("--json", metavar="FILE", help="write the full record to a JSON file")
     parser.add_argument("--show-graph", action="store_true", help="print the agent graph as Mermaid and exit")
     parser.add_argument("--answer", action="append", metavar="TEXT", help="scripted answer to the agent's next question")
-    parser.add_argument("--approve", metavar="TEXT", help='scripted approval, e.g. "yes internal only" or "no"')
+    parser.add_argument("--haiku", action="store_true", help="use Haiku and its prompt (default: Sonnet)")
     args = parser.parse_args()
+    llm.choose_model(args.haiku)
     http.OFFLINE = args.offline
     # Scripted answers offline, when any are given, or when nobody is at the keyboard.
-    use_script = args.answer or args.approve or args.offline or not sys.stdin.isatty()
-    script = {"ask": list(args.answer or []), "approve": args.approve} if use_script else None
+    use_script = args.answer or args.offline or not sys.stdin.isatty()
+    script = {"ask": list(args.answer or [])} if use_script else None
 
     try:
         app = graph.build_graph()
@@ -71,22 +68,20 @@ def main() -> None:
         state = graph.run(app, args.question, make_answer_fn(script))
     except llm.LLMError as e:
         sys.exit(f"Error: {e}")
-    except (KeyboardInterrupt, EOFError):  # Ctrl+C / Ctrl+D while waiting: nothing has been saved
-        sys.exit("\nCancelled: nothing saved.")
+    except (KeyboardInterrupt, EOFError):  # Ctrl+C / Ctrl+D while waiting for an answer
+        sys.exit("\nCancelled.")
     seconds = round(time.time() - started, 1)
 
     if state["report"] is None:
-        print(state["answer"])  # direct answer: no report, nothing to approve
-    elif state["decision"]["approved"]:
-        print(f"Saved to {register.REGISTER_PATH.name}.")
+        print(state["answer"])  # direct answer: no report
     else:
-        print("Not saved (rejected).")
+        print(report.render(state["report"]))
     n_tools = sum(1 for t in state["trace"] if t.get("tool") not in (None, "submit_report", "ask_user"))
     n_q = state["questions_asked"]
     print(f"\n({n_tools} tool calls · {n_q} question{'s' * (n_q != 1)} · {seconds} s · --trace for details)")
     if args.trace:
         print_trace(state["trace"])
     if args.json:
-        keys = ("question", "answer", "report", "decision", "trace", "tool_outputs")
+        keys = ("question", "answer", "report", "trace", "tool_outputs")
         with open(args.json, "w") as f:
             json.dump({**{k: state[k] for k in keys}, "seconds": seconds}, f, indent=2, default=str)

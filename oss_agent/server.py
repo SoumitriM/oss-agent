@@ -3,10 +3,9 @@
 Standard library only (no web framework). Two JSON endpoints map onto the graph:
   POST /api/start  {"question"}           -> runs until the graph needs a human, or is done
   POST /api/resume {"thread_id", "answer"} -> resumes after the agent's question (ask interrupt)
-The web chat never saves to the register: its approve step is answered "no" by the server, so the page
-shows the answer without any approve/save controls. (The command line keeps the approval step.)
 The MemorySaver checkpointer in the graph keeps each conversation's state between requests.
 """
+import argparse
 import json
 import time
 import traceback
@@ -29,15 +28,13 @@ def _step(result: dict, thread_id: str) -> dict:
     """Turn a graph result into what the page needs next."""
     if result.get("__interrupt__"):
         payload = dict(result["__interrupt__"][0].value)
-        if payload.get("report"):  # same sections as the terminal answer (one renderer, one source of truth)
-            payload["presentation"] = report.present(payload["report"])
         return {"status": "interrupt", "thread_id": thread_id, "interrupt": payload}
     trace = result["trace"]
     rep = result["report"]
     return {
         "status": "done", "thread_id": thread_id, "question": result["question"], "answer": result["answer"],
         "report": result["report"],
-        "decision": result["decision"], "trace": trace, "presentation": report.present(rep) if rep else None,
+        "trace": trace, "presentation": report.present(rep) if rep else None,
         "tool_calls": sum(1 for t in trace if t.get("tool") not in (None, "submit_report", "ask_user")),
         "questions": result["questions_asked"], "seconds": round(time.time() - STARTED.pop(thread_id, time.time()), 1),
     }
@@ -80,8 +77,6 @@ class Handler(BaseHTTPRequestHandler):
                 result = APP.invoke(Command(resume=str(body.get("answer", ""))), _config(thread_id))
             else:
                 return self._json(404, {"error": "not found"})
-            while _is_approval(result):  # web chat: never save, never ask for approval
-                result = APP.invoke(Command(resume="no"), _config(thread_id))
             step = _step(result, thread_id)
         except llm.LLMError as e:
             return self._json(502, {"error": str(e)})
@@ -97,10 +92,6 @@ class Handler(BaseHTTPRequestHandler):
 EXPIRED = "This conversation is no longer open (the server was restarted, or it already finished). Please ask your question again."
 
 
-def _is_approval(result: dict) -> bool:
-    return bool(result.get("__interrupt__")) and result["__interrupt__"][0].value.get("type") == "approve"
-
-
 def _config(thread_id: str) -> dict:
     return {"configurable": {"thread_id": thread_id}, "recursion_limit": 6 * graph.MAX_STEPS}
 
@@ -108,8 +99,11 @@ def _config(thread_id: str) -> dict:
 def main() -> None:
     global APP
     load_dotenv()
+    parser = argparse.ArgumentParser(prog="oss_agent.server", description="OSS due-diligence web chat")
+    parser.add_argument("--haiku", action="store_true", help="use Haiku and its prompt (default: Sonnet)")
+    model = llm.choose_model(parser.parse_args().haiku)
     APP = graph.build_graph()
-    print(f"OSS due-diligence chat on http://{HOST}:{PORT}  (Ctrl+C to stop)")
+    print(f"OSS due-diligence chat on http://{HOST}:{PORT} with {model}  (Ctrl+C to stop)")
     try:
         ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
     except KeyboardInterrupt:

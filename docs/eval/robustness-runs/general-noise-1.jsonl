@@ -1,4 +1,0 @@
-{"event": "question", "run": "general-noise-1", "question": "I am preparing a short talk for my team. What does copyleft mean?", "fault": null}
-{"event": "guard", "detail": "input ok"}
-{"event": "ai_step", "node": "agent", "step": 1, "detail": "general question \u2192 fixed pointer", "tokens": 10563, "seconds": 2.49}
-{"event": "final", "decision": "General pointer", "answer": "That's a general question, so I won't answer it from memory: you can look it up online. I can only help assess a specific open-source component (a library, tool, repository or AI-agent skill): its licence, security, maintenance and privacy, with evidence for every finding. For example: \"Can we use <package> in our product?\"", "report": null, "steps": 1, "seconds": 2.5, "tokens": 10563}

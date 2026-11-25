@@ -52,6 +52,7 @@ def post_process(report: dict, repo_info: dict | None, tool_outputs: list = (), 
     report["left_out"] = evidence.strip_unsupported(report, tool_outputs, asked_text or report.get("question", ""))
     rules.confirmed_needs_inspection(report["findings"], tool_outputs)
     rules.safety(report, tool_outputs, asked_text or report.get("question", ""))
+    rules.privacy_gate(report)
     for o in tool_outputs:  # instruction-like text in tool output: always shown, never followed
         for hit in o["result"].get("injections", [])[:2]:
             report["findings"].append({"area": "skills" if o["tool"] == "scan_skill" else "security",
@@ -83,6 +84,8 @@ def _confidence(report: dict) -> dict:
     elif any("not checked for vulnerabilities" in x or "could not be confirmed in its registry" in x
              for x in report.get("limitations", [])) and level == "high":
         level, reason = "medium", "Some versions were not checked for vulnerabilities. " + reason
+    elif report["areas"]["privacy"].get("incomplete") and level == "high":
+        level, reason = "medium", "The privacy check this question needed is incomplete. " + reason
     return {"level": level, "reason": reason}
 
 
@@ -118,8 +121,6 @@ def _checks_run(tool_outputs: list) -> list:
             rows.append({"tool": tool, "text": f"{r.get('skill_path')} ({r.get('skill_lines', '?')} lines, "
                                  f"{sum(r.get('signal_counts', {}).values())} lines flagged for inspection)",
                          "url": f"https://github.com/{r.get('repo')}/blob/{r.get('commit')}/{r.get('skill_path')}"})
-        elif tool == "lookup_register":
-            rows.append({"tool": tool, "text": ("found" if r.get("found") else "none"), "url": ""})
     return rows
 
 
@@ -149,6 +150,9 @@ def _limitations(report: dict, tool_outputs: list) -> list:
     for a in AREAS:  # the agent rated it, but no source backed the rating
         if "no verified evidence" in report["areas"][a].get("summary", ""):
             out.append(f"{LABEL[a]}: the assessment could not be backed by a source, so it is not shown.")
+    if report["areas"]["privacy"].get("incomplete"):
+        out.append("Privacy was needed for this question, but the check is incomplete: "
+                   + report["areas"]["privacy"]["summary"].removeprefix("Incomplete: "))
     unconfirmed = rules.unconfirmed_packages(tool_outputs)
     if unconfirmed:
         out.append(f"The package name could not be confirmed in its registry ({', '.join(unconfirmed)}), so "
@@ -166,7 +170,7 @@ def _limitations(report: dict, tool_outputs: list) -> list:
 
 LABELS = {"get_repo_info": "Repository facts (licence, activity)", "check_vulnerabilities": "Vulnerability databases",
           "find_version": "Version lookup", "search_code": "Code search", "read_file": "File read",
-          "scan_skill": "Skill scan", "lookup_register": "Earlier approval record"}
+          "scan_skill": "Skill scan"}
 
 
 ANSWER = "Answer"
@@ -214,7 +218,8 @@ def _short(text: str, n: int = 110) -> str:
 def present(report: dict) -> dict:
     """Sections of the answer: decision, the agent's answer, evidence per area, next steps, limits."""
     areas = report["areas"]
-    shown = sorted((a for a in AREAS if areas[a]["status"] != "not_checked"), key=lambda a: -rules.RANK[areas[a]["status"]])
+    shown = sorted((a for a in AREAS if areas[a]["status"] != "not_checked" or areas[a].get("incomplete")),
+                   key=lambda a: -rules.RANK[areas[a]["status"]])
     why = []
     for a in shown:
         findings = sorted((f for f in report["findings"] if f.get("area") == a), key=lambda f: not f.get("verified"))[:3]
@@ -303,4 +308,6 @@ def check_consistency(report: dict, text: str) -> list:
     for a in AREAS:
         if report["areas"][a]["status"] == "red" and f"{LABEL[a]}:" not in text:
             problems.append(f"red area {a} is not shown")
+    if report.get("privacy_check_required") and f"{LABEL['privacy']}:" not in text:
+        problems.append("privacy was required but the answer has no privacy result")
     return problems

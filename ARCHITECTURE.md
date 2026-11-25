@@ -15,14 +15,14 @@ flowchart LR
     T --> A
     A -->|ask_user| K[ask<br/>human answers, max 2]
     K --> A
-    A -->|no tools, out of scope| R2[fixed refusal]
-    A -->|no tools, general| R3[fixed pointer]
+    A -->|no tools: out of scope or general| R2[fixed refusal]
     T -->|submit_report| C[checks<br/>evidence + safety rules]
+    A -.->|stops early| N[nudge] --> A
     A -.->|step limit / no report| F[force_report] --> C
-    C --> P[approve<br/>CLI only] -->|yes| S[(register.jsonl)]
+    C --> E([END])
 ```
 
-A LangGraph `StateGraph` in [oss_agent/graph.py](oss_agent/graph.py) implements this flow. Human steps (`ask`, `approve`) use `interrupt()`, and the graph resumes with the answer. The web server answers "no" at the approve step, so the web chat never saves.
+A LangGraph `StateGraph` in [oss_agent/graph.py](oss_agent/graph.py) implements this flow. The human step (`ask`) uses `interrupt()`, and the graph resumes with the answer. Nothing is saved after a run: the report is the output.
 
 ### Example walk-through: "Is axios@1.14.1 safe to install in our production backend?"
 
@@ -33,7 +33,7 @@ A LangGraph `StateGraph` in [oss_agent/graph.py](oss_agent/graph.py) implements 
 5. **checks:** code finds each quote in the tool output. If a vulnerability database flags the version as malicious, rule 1 sets security to red, whatever the model wrote.
 6. **Decision:** 🔴 Do not adopt.
 
-(This shows the path through the graph. For the actual tool calls in recorded runs, see the robustness logs in `docs/eval/robustness-runs/`.)
+(This shows the path through the graph. Run with `--trace` to see the actual tool calls.)
 
 ## Limits that keep cost and loops bounded
 
@@ -58,7 +58,6 @@ A LangGraph `StateGraph` in [oss_agent/graph.py](oss_agent/graph.py) implements 
 | `search_code` | GitHub code search | matching files in the latest code (used for things like telemetry) |
 | `read_file` | raw.githubusercontent.com | numbered lines at a commit or a release tag (`ref`); never silently falls back to the latest code |
 | `scan_skill` | GitHub | pattern signals in an AI-agent skill folder (override, exfiltration, secrets…); these are signals only, never a verdict |
-| `lookup_register` | local `register.jsonl` | earlier saved assessments of the same repo |
 | `ask_user` | the human | one clarifying question |
 | `submit_report` | — | the agent's final report (JSON schema) |
 
@@ -79,14 +78,14 @@ These are the only places where code overrides the model. Each one can only make
 | Decision label | `report.decision` | Computed from area statuses, never written by the model. |
 | Confidence | `report._confidence` | The model proposes a level. Code can only lower it. |
 | Limitations | `report._limitations` | Lists only checks that failed: tool errors not redone, unavailable databases, removed claims. |
-| Scope | `graph.agent`, `guard.py` | Refusal and general pointer are fixed texts from code. The model's own wording is never shown. |
+| Scope | `graph.agent`, `guard.py` | Out-of-scope and general questions get one fixed refusal from code (`guard.REFUSAL`). The model's own wording is never shown. |
 
 ## Security layers
 
 | Layer | How |
 |---|---|
 | Read-only | `guard.READ_ONLY_TOOLS`; `build_graph()` asserts every data tool is in it |
-| Network | `http.ALLOWED_HOSTS`: GitHub, OSV, NVD, endoflife.date and five package registries (see [docs/APIS.md](docs/APIS.md)). Only GET, except POST to the one OSV query endpoint. |
+| Network | `http.ALLOWED_HOSTS`: GitHub, OSV, NVD, endoflife.date and five package registries (listed in the README). Only GET, except POST to the one OSV query endpoint. |
 | Prompt injection in fetched content | results are wrapped in `<untrusted_data>`; `guard.neutralise` stops text from closing the wrapper; `guard.scan_untrusted` flags instructions aimed at AI agents |
 | Prompt injection in the question | wrapper and system tags are neutralised; role-change requests count as out of scope |
 | Arguments | checked against the tool schema; length capped at 500 chars |
@@ -98,14 +97,14 @@ These are the only places where code overrides the model. Each one can only make
 | File | Role |
 |---|---|
 | `prompts.py` | system prompt: scope, how to work (understand, plan, gather, answer), what each area needs, report format. General principles only, with no test cases. |
+| `prompts_haiku.py` | the same prompt with stricter "when to stop" principles, for smaller models. `--haiku` on the CLI or server picks Haiku and this prompt; without it, Sonnet and `prompts.py`. `graph.build_graph` chooses the prompt from the model name (or `PROMPT=haiku`). |
 | `graph.py` | the LangGraph state machine and routing |
-| `llm.py` | two backends, both returning a LangChain `AIMessage` with tool calls: `ChatAnthropic` (API key) and `ChatClaudeCLI` (`claude -p`, built-in tools disabled, JSON-schema replies) |
+| `llm.py` | three backends, all returning a LangChain `AIMessage` with tool calls: `ChatAnthropic` (API key), `ChatOpenAI` on OpenRouter (API key, any model with tool calling) and `ChatClaudeCLI` (`claude -p`, built-in tools disabled, JSON-schema replies) |
 | `tools.py` | GitHub tools, the tool schemas, and the `submit_report` schema |
 | `vulns.py` | OSV, GitHub advisories, NVD, endoflife.date |
 | `versions.py` | `find_version` |
 | `registries.py` | package registries: package → repo, versions with dates, does the package exist |
 | `skills.py` | `scan_skill` patterns |
-| `register.py` | append-only `register.jsonl` and lookup |
 | `evidence.py` | quote verification, evidence gaps, feedback round, removal of unsupported claims |
 | `rules.py` | the safety rules, legal references (GDPR/CRA articles for verified findings), overall status |
 | `report.py` | post-processing pipeline, decision, confidence, limitations, `present()` for the web and `render()` for the CLI |
@@ -127,18 +126,21 @@ verify quotes → unbacked areas to not checked → strip unsupported claims and
 | The LLM reads the question as written; code does no name normalisation | Code "fixing" typos made things worse. The model can understand a typo, while a look-alike package name is checked exactly as written. | It relies on model judgement, which the robustness eval measures |
 | The model plans its tools; code never enforces an order | Handles unforeseen questions; less code | Tool choice can vary between runs |
 | Independent tools in one step | fewer LLM round trips, so lower cost and latency | the CLI backend is capped at 3 per step |
-| Fixed texts for refusal and general questions | no answers from memory, so nothing unverified | general questions get no answer |
+| One fixed text for out-of-scope and general questions | no answers from memory, so nothing unverified | general questions get no answer |
 | Code can only lower confidence and statuses | the model cannot talk its way to an approval | some answers are more cautious than they need to be |
 | One evidence feedback round | the agent can repair a bad quote, and cost stays bounded | a second mistake is removed rather than fixed |
 | A frozen HTTP snapshot for evals | a changed result means the agent changed, not the world | snapshots must be refreshed on purpose |
-| The leak test bans test-case terms from the prompt | prevents overfitting to the eval set | vocabulary exemptions need upkeep |
+| No test-case terms in the prompt | prevents overfitting to the eval set | not checked automatically any more (the leak test was removed) |
+| A separate prompt for smaller models, built from the main one | Haiku over-checked with the main prompt; the main prompt stays unchanged | two prompts to keep in step (the Haiku file fails at start-up if the passages it replaces change) |
 
 ## Known gaps
 
-- Prompt caching is built for the API backend but not yet measured on a live run (no API key configured).
+- Prompt caching works on OpenRouter (about 6–8k cached tokens per step in live runs); not measured on the Anthropic API backend.
+- Big npm packages (e.g. n8n) exceed the 2 MB HTTP cap on the registry's full record, so `find_version` for them fails and falls back to other sources.
+- No offline unit tests (removed on 25 Nov 2026): a code change is checked only by the evals, which call the model.
 - The NVD CPE (vendor:product) and the endoflife.date id are chosen by the model from its own knowledge, not looked up in the source. A wrong id finds nothing, so code treats "0 CVEs" and a 404 as **no match**, never as a clean answer: for a product with no package ecosystem, security then shows as not checked. The cost: a product with genuinely zero CVEs also shows as not checked. The CPE used is shown in "checks run".
 - `find_version` reads only the latest 100 GitHub releases.
 - No registry lookup for Maven and NuGet yet: give the repository, and security can't be green.
 - PyPI and RubyGems name a repository only if the author listed one; otherwise the agent must ask.
 - `search_code` searches the latest code only, not a specific version.
-- The evaluation v2 runs and the reviewer agents in [docs/EVAL-PLAN.md](docs/EVAL-PLAN.md) have not been run yet.
+- The evals have one run per case so far, which gives a first signal, not a pass rate.

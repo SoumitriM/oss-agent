@@ -7,12 +7,10 @@
 Per run, checks: required tools called, forbidden tools not called, steps <= max_steps,
 questions asked <= 2, all quotes verified, expected verdict, plus optional area statuses,
 headline, required finding text and legal article. Interrupts get the case's scripted answers.
-The register is a fresh temp file per run, so earlier approvals never change a case.
 """
 import argparse
 import json
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -20,14 +18,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))  # run as a plain script f
 
 from dotenv import load_dotenv  # noqa: E402
 
-from oss_agent import graph, guard, http, llm, register  # noqa: E402
+from oss_agent import graph, guard, http, llm  # noqa: E402
 
 CASES = Path(__file__).parent / "test_cases.json"
 
 
 def answer_fn(script: dict):
     asks = list(script.get("ask", []))
-    return lambda p: (asks.pop(0) if asks else "") if p["type"] == "ask" else script.get("approve", "no")
+    return lambda p: asks.pop(0) if asks else ""
 
 
 def first_plan(state: dict) -> str:
@@ -68,7 +66,7 @@ def check(case: dict, state: dict) -> dict:
     if "max_tool_calls" in exp:  # simple questions must stay cheap
         checks["calls"] = (len(data_calls) <= exp["max_tool_calls"], f"{len(data_calls)}/{exp['max_tool_calls']}")
     if "refusal" in exp:  # out of scope or role-change: the agent's marker becomes code's fixed text
-        checks["refusal"] = (state["answer"] in (guard.REFUSAL, guard.TOO_LONG, guard.GENERAL_REPLY), (state["answer"] or "-")[:40])
+        checks["refusal"] = (state["answer"] in (guard.REFUSAL, guard.TOO_LONG), (state["answer"] or "-")[:40])
     if "min_tool_calls" in exp:  # questions about component facts must use evidence
         checks["min_calls"] = (len(data_calls) >= exp["min_tool_calls"], f"{len(data_calls)}>={exp['min_tool_calls']}")
     for key in ("repo", "package_location"):
@@ -127,7 +125,6 @@ def main() -> None:
     args = p.parse_args()
     runs = 1 if args.record else args.runs
     cases = [c for c in json.loads(CASES.read_text()) if not args.case or c["id"] == args.case]
-    register.REGISTER_PATH = Path(tempfile.mkdtemp()) / "register.jsonl"  # never the real register
     app = graph.build_graph()
 
     print(f"{'case':<28} {'run':>3}  {'result':<6} {'tokens':>7} {'sec':>6}  failed checks / details")
@@ -137,7 +134,6 @@ def main() -> None:
             pending.append(case["id"])
             print(f"{case['id']:<28} {'-':>3}  {'skip':<6} {'':>7} {'':>6}  pending: {case['pending']}")
             continue
-        register.REGISTER_PATH.unlink(missing_ok=True)
         for n in range(1, runs + 1):
             r = run_case(app, case, n, offline=not args.record)
             results.append((case["id"], r))
