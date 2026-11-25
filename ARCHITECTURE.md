@@ -141,3 +141,44 @@ verify quotes → unbacked areas to not checked → strip unsupported claims and
 - PyPI and RubyGems name a repository only if the author listed one; otherwise the agent must ask.
 - `search_code` searches the latest code only, not a specific version.
 - The evals have one run per case so far, which gives a first signal, not a pass rate.
+
+## Package registries
+
+The registry, not the model, says which repository a package comes from, which versions exist, and whether the package exists at all.
+
+| Ecosystem | Registry | Package → repo | Versions with dates | Package exists |
+|---|---|---|---|---|
+| JavaScript | npm | ✅ | ✅ | ✅ |
+| PHP | Packagist | ✅ | ✅ | ✅ |
+| Python | PyPI | ✅ if the package lists its GitHub source | ✅ | ✅ |
+| Rust | crates.io | ✅ | ✅ | ✅ |
+| Ruby | RubyGems | ✅ if the gem lists its GitHub source | ✅ | ✅ |
+| Go | none: the module path (`github.com/owner/name`) names the repo | ✅ | from GitHub releases | ✅ (the repo exists) |
+| Java (Maven), .NET (NuGet) | **not yet** | ❌ give the repository instead | ❌ | ❌ |
+
+Vulnerability databases (OSV, GitHub advisories) cover all of these ecosystems, Maven and NuGet included.
+
+## External APIs
+
+All calls are read-only (GET, plus one POST to the OSV query endpoint) and go through one function in `oss_agent/http.py`, which refuses every other host.
+
+| Host | Used for | Key |
+|---|---|---|
+| api.github.com | repository facts, commits, licence, files, code search, releases, GitHub security advisories | `GITHUB_TOKEN`, optional |
+| raw.githubusercontent.com | file contents at a pinned commit | — |
+| api.osv.dev | vulnerabilities and malicious releases (OSV) | — |
+| services.nvd.nist.gov | CVEs by CPE (NVD) | `NVD_API_KEY`, optional |
+| endoflife.date | end-of-life dates of runtimes and products | — |
+| registry.npmjs.org, repo.packagist.org, pypi.org, crates.io, rubygems.org | package registries | — |
+
+## Running and settings
+
+CLI options: `--haiku` (Haiku 5.5 and `prompts_haiku.py` instead of Sonnet 5.5), `--trace` (every step and tool call), `--json FILE` (full record), `--offline` (cached HTTP only), `--show-graph` (Mermaid), `--answer TEXT` (scripted answer to the agent's question). The web server takes `--haiku` too.
+
+| Setting | Used by | Purpose |
+|---|---|---|
+| `LLM_MODEL` | `tests/eval.py` only | the CLI and server pick Sonnet, or Haiku with `--haiku`. With `openrouter` it is an OpenRouter id, e.g. `anthropic/claude-haiku-5.5` |
+| `PROMPT=haiku` | all | forces the Haiku prompt for any model, e.g. to test Sonnet with it |
+| `OSS_CACHE_DIR` | all | where HTTP responses are cached (default `tests/fixtures/http_cache`, not in git) |
+
+The case eval checks per run: verdict, area statuses, required and forbidden tools, step and tool-call limits, questions asked, verified quotes, required finding, legal article and refusal.
